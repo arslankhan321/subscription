@@ -5,8 +5,10 @@ import {
     DEFAULT_WIDGET,
     PLAN_STATUS,
 } from "@/constants/planConstants";
-import { buildPlanPayload, validatePlanForm } from "@/utils/planHelpers";
+import { buildPlanPayload } from "@/utils/planHelpers";
+import { validateAutoChargeForm } from "@/utils/planValidation";
 import { getApiErrorMessage, showToast } from "@/utils/shopifyToast";
+import { buildProductSummary } from "@/utils/productHelpers";
 import { useDeliveryOptions } from "./useDeliveryOptions";
 import { useProductPicker } from "./useProductPicker";
 
@@ -29,21 +31,22 @@ export function useCreatePlan({ onSuccess }) {
         () => ({
             widget,
             optionCount: deliveryOptions.length,
-            productNames: products.map((p) => p.title),
+            ...buildProductSummary(products),
         }),
         [widget, deliveryOptions.length, products]
     );
 
     const submitPlan = useCallback(
         async ({ published = false } = {}) => {
-            const validationErrors = validatePlanForm({
+            const validationResult = validateAutoChargeForm({
                 planName,
+                widget,
                 products,
                 deliveryOptions,
             });
 
-            if (validationErrors.length) {
-                showToast(validationErrors[0], { isError: true });
+            if (validationResult.errors.length) {
+                showToast(validationResult.errors[0], { isError: true });
                 return;
             }
 

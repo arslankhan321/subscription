@@ -2,17 +2,26 @@ import PlanEditor from "@/Components/Plans/Create/PlanEditor";
 import ProductSelector from "@/Components/Plans/Create/ProductSelector";
 import PlanSummary from "@/Components/Plans/Create/PlanSummary";
 import PlanFormLoader from "@/Components/Plans/PlanFormLoader";
+import PlanSaveBar from "@/Components/Plans/PlanSaveBar";
+import PlanValidationBanner from "@/Components/Plans/PlanValidationBanner";
 import RecurringIntervalsSection, {
     RecurringEmailSection,
     RecurringDiscountSection,
 } from "@/Components/Plans/RecurringInvoice/RecurringIntervalsSection";
 import { useRecurringInvoicePlanForm } from "@/hooks/plans/useRecurringInvoicePlanForm";
+import { useShopifySaveBar } from "@/hooks/useShopifySaveBar";
 import { formatPlanStatus } from "@/utils/planHelpers";
 import "@/styles/plans.css";
 
 export default function RecurringInvoicePlanForm({ planId = null, onBack, onSaved }) {
     const {
         isEdit,
+        isDirty,
+        saveBarId,
+        validationErrors,
+        fieldErrors,
+        intervalOptionErrors,
+        clearFieldError,
         planName,
         setPlanName,
         widget,
@@ -42,6 +51,8 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
         handleSaveDraft,
         handlePublish,
         handleSaveChanges,
+        handleSaveFromBar,
+        handleDiscard,
     } = useRecurringInvoicePlanForm({
         planId,
         onSuccess: () => {
@@ -50,6 +61,17 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
         },
     });
 
+    const { confirmLeave } = useShopifySaveBar({
+        id: saveBarId,
+        isDirty,
+        enabled: !initialLoading,
+    });
+
+    const handleBack = async () => {
+        await confirmLeave();
+        onBack?.();
+    };
+
     const pageHeading = isEdit
         ? `Edit: ${planName || "Recurring invoice"}`
         : planName || "New recurring invoice";
@@ -57,7 +79,15 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
     return (
         <div className="plans-page">
             <s-page heading={pageHeading}>
-                <s-button slot="secondary-action" onClick={onBack}>
+                <PlanSaveBar
+                    id={saveBarId}
+                    onSave={handleSaveFromBar}
+                    onDiscard={handleDiscard}
+                    saving={loading}
+                    saveLabel={isEdit ? "Save" : "Save draft"}
+                />
+
+                <s-button slot="secondary-action" onClick={handleBack}>
                     Back to Plans
                 </s-button>
 
@@ -105,19 +135,32 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
                     ) : (
                         <div className="plan-form-layout">
                             <div className="plan-form-main">
+                                <PlanValidationBanner errors={validationErrors} />
+
                                 <div className="plan-section-card">
                                     <PlanEditor
                                         planName={planName}
                                         widget={widget}
-                                        onPlanNameChange={setPlanName}
-                                        onWidgetChange={setWidget}
+                                        fieldErrors={fieldErrors}
+                                        onPlanNameChange={(value) => {
+                                            setPlanName(value);
+                                            clearFieldError("planName");
+                                        }}
+                                        onWidgetChange={(value) => {
+                                            setWidget(value);
+                                            clearFieldError("widget");
+                                        }}
                                     />
                                 </div>
 
                                 <div className="plan-section-card">
                                     <ProductSelector
                                         products={products}
-                                        onSelectProducts={handleSelectProducts}
+                                        fieldErrors={fieldErrors}
+                                        onSelectProducts={async () => {
+                                            await handleSelectProducts();
+                                            clearFieldError("products");
+                                        }}
                                         onRemoveProduct={removeProduct}
                                         onRemoveProductGroup={removeProductGroup}
                                     />
@@ -133,8 +176,13 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
                                     <RecurringIntervalsSection
                                         intervalUnit={intervalUnit}
                                         intervalOptions={intervalOptions}
+                                        intervalOptionErrors={intervalOptionErrors}
+                                        sectionError={fieldErrors.intervalOptions}
                                         onIntervalUnitChange={setIntervalUnit}
-                                        onIntervalChange={updateInterval}
+                                        onIntervalChange={(id, frequency) => {
+                                            updateInterval(id, frequency);
+                                            clearFieldError("intervalOptions");
+                                        }}
                                         onAddInterval={addInterval}
                                         onRemoveInterval={removeInterval}
                                     />
@@ -149,9 +197,20 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
                                         giveDiscount={giveDiscount}
                                         discountAmount={discountAmount}
                                         discountDescription={discountDescription}
-                                        onGiveDiscountChange={setGiveDiscount}
-                                        onDiscountAmountChange={setDiscountAmount}
-                                        onDiscountDescriptionChange={setDiscountDescription}
+                                        fieldErrors={fieldErrors}
+                                        onGiveDiscountChange={(value) => {
+                                            setGiveDiscount(value);
+                                            clearFieldError("discountAmount");
+                                            clearFieldError("discountDescription");
+                                        }}
+                                        onDiscountAmountChange={(value) => {
+                                            setDiscountAmount(value);
+                                            clearFieldError("discountAmount");
+                                        }}
+                                        onDiscountDescriptionChange={(value) => {
+                                            setDiscountDescription(value);
+                                            clearFieldError("discountDescription");
+                                        }}
                                     />
                                 </div>
                             </div>
@@ -172,7 +231,7 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
                                     loading={loading}
                                     isEdit={isEdit}
                                     isLocalOnly
-                                    onBack={onBack}
+                                    onBack={handleBack}
                                     onSaveDraft={handleSaveDraft}
                                     onPublish={handlePublish}
                                     onSaveChanges={handleSaveChanges}

@@ -4,6 +4,7 @@ namespace App\Http\Requests;
 
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreSubscriptionPlanRequest extends FormRequest
 {
@@ -24,38 +25,43 @@ class StoreSubscriptionPlanRequest extends FormRequest
     {
         return [
 
-            'name' => ['required','string','max:255'],
-            'planType' => ['nullable','in:auto_charge,recurring_invoice'],
-            'widget' => ['nullable','string'],
+            'name' => ['required', 'string', 'max:255'],
+            'planType' => ['nullable', 'in:auto_charge,recurring_invoice'],
+            'widget' => ['required', 'string', 'max:255'],
 
-            'subscriptionEmailHour' => ['nullable','string','max:50'],
-            'discountDescription' => ['nullable','string','max:1000'],
+            'subscriptionEmailHour' => ['nullable', 'string', 'max:50'],
+            'discountDescription' => [
+                Rule::requiredIf(fn () => $this->input('planType') === 'recurring_invoice' && $this->boolean('deliveryOptions.0.giveDiscount')),
+                'nullable',
+                'string',
+                'max:1000',
+            ],
 
-            'status' => ['nullable','in:draft,active,archived'],
-            'published' => ['nullable','boolean'],
-            'merchant_code' => ['nullable','string'],
+            'status' => ['nullable', 'in:draft,active,archived'],
+            'published' => ['nullable', 'boolean'],
+            'merchant_code' => ['nullable', 'string'],
 
-            'products' => ['required','array'],
+            'products' => ['required', 'array', 'min:1'],
             'products.*.id' => ['required'],
             'products.*.variantId' => ['nullable'],
-            'products.*.title' => ['nullable'],
-            'products.*.image' => ['nullable'],
+            'products.*.title' => ['nullable', 'string'],
+            'products.*.image' => ['nullable', 'string'],
 
-            'deliveryOptions' => ['required','array'],
+            'deliveryOptions' => ['required', 'array', 'min:1'],
 
-            'deliveryOptions.*.name' => ['nullable'],
+            'deliveryOptions.*.name' => ['required', 'string', 'max:255'],
             'deliveryOptions.*.billingType' => ['required', 'string'],
-            'deliveryOptions.*.deliveryFrequency' => ['required'],
-            'deliveryOptions.*.deliveryInterval' => ['required'],
+            'deliveryOptions.*.deliveryFrequency' => ['required', 'integer', 'min:1'],
+            'deliveryOptions.*.deliveryInterval' => ['required', Rule::in(['days', 'weeks', 'months', 'years'])],
 
             'deliveryOptions.*.billingFrequency' => ['nullable', 'integer', 'min:1'],
-            'deliveryOptions.*.billingInterval' => ['nullable', 'in:days,weeks,months,years'],
+            'deliveryOptions.*.billingInterval' => ['nullable', Rule::in(['days', 'weeks', 'months', 'years'])],
 
             'deliveryOptions.*.minOrders' => ['nullable', 'string'],
             'deliveryOptions.*.maxOrders' => ['nullable', 'string'],
 
             'deliveryOptions.*.giveDiscount' => ['nullable', 'boolean'],
-            'deliveryOptions.*.discountAmount' => ['nullable', 'numeric', 'min:0'],
+            'deliveryOptions.*.discountAmount' => ['nullable', 'numeric', 'min:0', 'max:100'],
             'deliveryOptions.*.discountType' => ['nullable', 'string'],
 
             'deliveryOptions.*.changeDiscountAfterOrders' => ['nullable', 'boolean'],
@@ -68,5 +74,51 @@ class StoreSubscriptionPlanRequest extends FormRequest
             'deliveryOptions.*.shippingDiscountAfterOrders' => ['nullable', 'integer', 'min:1'],
             'deliveryOptions.*.shippingDiscountType' => ['nullable', 'string'],
         ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'name.required' => 'Plan name is required.',
+            'widget.required' => 'Widget assignment is required.',
+            'products.required' => 'Select at least one product.',
+            'products.min' => 'Select at least one product.',
+            'deliveryOptions.required' => 'Add at least one delivery option or interval.',
+            'deliveryOptions.min' => 'Add at least one delivery option or interval.',
+            'deliveryOptions.*.deliveryFrequency.min' => 'Delivery frequency must be at least 1.',
+            'deliveryOptions.*.name.required' => 'Option name is required.',
+            'deliveryOptions.*.name.max' => 'Option name must be 255 characters or less.',
+            'discountDescription.required' => 'Discount description is required when a discount is enabled.',
+        ];
+    }
+
+    public function withValidator($validator): void
+    {
+        $validator->after(function ($validator) {
+            $options = $this->input('deliveryOptions', []);
+
+            if (! is_array($options)) {
+                return;
+            }
+
+            $seenNames = [];
+
+            foreach ($options as $index => $option) {
+                $name = trim((string) ($option['name'] ?? ''));
+
+                if ($name !== '') {
+                    $normalized = strtolower($name);
+
+                    if (isset($seenNames[$normalized])) {
+                        $validator->errors()->add(
+                            "deliveryOptions.$index.name",
+                            'Each delivery option must have a unique name.'
+                        );
+                    } else {
+                        $seenNames[$normalized] = $index;
+                    }
+                }
+            }
+        });
     }
 }

@@ -43,14 +43,28 @@ export default function PlanSummary({
 
             <div className="plan-summary-item">
                 <s-text tone="subdued">Products</s-text>
-                {summary.productNames.length === 0 ? (
+                {summary.productCount === 0 ? (
                     <s-text tone="subdued">None selected</s-text>
                 ) : (
-                    <s-unordered-list>
-                        {summary.productNames.map((name) => (
-                            <s-list-item key={name}>{name}</s-list-item>
-                        ))}
-                    </s-unordered-list>
+                    <div className="plan-summary-products">
+                        <s-text type="strong">
+                            {summary.productCount} product{summary.productCount === 1 ? "" : "s"}
+                            {summary.variantCount > summary.productCount && (
+                                <>
+                                    {" · "}
+                                    {summary.variantCount} variant
+                                    {summary.variantCount === 1 ? "" : "s"}
+                                </>
+                            )}
+                        </s-text>
+                        {summary.previewNames?.length > 0 && (
+                            <p className="plan-summary-products__preview">
+                                {summary.previewNames.join(", ")}
+                                {summary.hiddenProductCount > 0 &&
+                                    ` +${summary.hiddenProductCount} more`}
+                            </p>
+                        )}
+                    </div>
                 )}
             </div>
 

@@ -13,10 +13,15 @@ import {
     buildRecurringInvoicePayload,
     createIntervalOption,
     mapRecurringInvoiceFromApi,
-    validateRecurringInvoiceForm,
 } from "@/utils/planHelpers";
 import { getApiErrorMessage, showToast } from "@/utils/shopifyToast";
+import { buildProductSummary } from "@/utils/productHelpers";
+import { validateRecurringInvoiceForm } from "@/utils/planValidation";
+import { useFormValidation } from "./useFormValidation";
 import { useProductPicker } from "./useProductPicker";
+import { useRecurringInvoiceDirtyState } from "./usePlanFormDirtyState";
+
+export const RECURRING_INVOICE_SAVE_BAR_ID = "plan-recurring-invoice-save-bar";
 
 export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
     const isEdit = Boolean(planId);
@@ -37,6 +42,30 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
     const [initialLoading, setInitialLoading] = useState(isEdit);
 
     const { products, setProducts, removeProduct, removeProductGroup, handleSelectProducts } = useProductPicker();
+
+    const {
+        validationErrors,
+        fieldErrors,
+        intervalOptionErrors,
+        applyValidation,
+        clearValidation,
+        clearFieldError,
+    } = useFormValidation();
+
+    const { isDirty, baseline, setBaselineFromCurrent, setBaselineFromData } =
+        useRecurringInvoiceDirtyState({
+            isEdit,
+            initialLoading,
+            planName,
+            widget,
+            products,
+            intervalUnit,
+            intervalOptions,
+            subscriptionEmailHour,
+            giveDiscount,
+            discountAmount,
+            discountDescription,
+        });
 
     useEffect(() => {
         if (!planId) return;
@@ -66,6 +95,7 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
                 setGiveDiscount(formData.giveDiscount);
                 setDiscountAmount(formData.discountAmount);
                 setDiscountDescription(formData.discountDescription);
+                setBaselineFromData(formData);
             } catch (error) {
                 console.error(error);
                 showToast(getApiErrorMessage(error, "Unable to load plan"), { isError: true });
@@ -79,13 +109,13 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
         return () => {
             cancelled = true;
         };
-    }, [planId, setProducts]);
+    }, [planId, setProducts, setBaselineFromData]);
 
     const summary = useMemo(
         () => ({
             widget,
             optionCount: intervalOptions.length,
-            productNames: products.map((p) => p.title),
+            ...buildProductSummary(products),
             status: planStatus,
             planType: "recurring_invoice",
         }),
@@ -108,14 +138,24 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
 
     const submitPlan = useCallback(
         async ({ status, published }) => {
-            const validationErrors = validateRecurringInvoiceForm({
+            const validationResult = validateRecurringInvoiceForm({
                 planName,
+                widget,
                 products,
                 intervalOptions,
+                giveDiscount,
+                discountAmount,
+                discountDescription,
             });
+            const isValid = applyValidation(validationResult);
 
-            if (validationErrors.length) {
-                showToast(validationErrors[0], { isError: true });
+            if (!isValid) {
+                showToast(validationResult.errors[0] || "Please fix the highlighted fields.", {
+                    isError: true,
+                });
+                document
+                    .getElementById("plan-validation-banner")
+                    ?.scrollIntoView({ behavior: "smooth", block: "start" });
                 return;
             }
 
@@ -147,6 +187,8 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
                     response.data.message ||
                         (isEdit ? "Plan updated successfully" : "Plan saved successfully")
                 );
+                setBaselineFromCurrent();
+                clearValidation();
                 onSuccess?.(response.data.data);
             } catch (error) {
                 console.error(error);
@@ -174,8 +216,26 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
             isEdit,
             planId,
             onSuccess,
+            setBaselineFromCurrent,
+            applyValidation,
+            clearValidation,
         ]
     );
+
+    const handleDiscard = useCallback(() => {
+        if (!baseline) return;
+
+        setPlanName(baseline.planName);
+        setWidget(baseline.widget);
+        setProducts(baseline.products.map((product) => ({ ...product })));
+        setIntervalUnit(baseline.intervalUnit);
+        setIntervalOptions(baseline.intervalOptions.map((option) => ({ ...option })));
+        setSubscriptionEmailHour(baseline.subscriptionEmailHour);
+        setGiveDiscount(baseline.giveDiscount);
+        setDiscountAmount(baseline.discountAmount);
+        setDiscountDescription(baseline.discountDescription);
+        clearValidation();
+    }, [baseline, setProducts, clearValidation]);
 
     const handleSaveDraft = useCallback(
         () => submitPlan({ status: PLAN_STATUS.DRAFT, published: false }),
@@ -192,8 +252,23 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
         [submitPlan, planStatus, planPublished]
     );
 
+    const handleSaveFromBar = useCallback(() => {
+        if (isEdit) {
+            handleSaveChanges();
+            return;
+        }
+
+        handleSaveDraft();
+    }, [isEdit, handleSaveChanges, handleSaveDraft]);
+
     return {
         isEdit,
+        isDirty,
+        saveBarId: RECURRING_INVOICE_SAVE_BAR_ID,
+        validationErrors,
+        fieldErrors,
+        intervalOptionErrors,
+        clearFieldError,
         planName,
         setPlanName,
         widget,
@@ -223,5 +298,7 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
         handleSaveDraft,
         handlePublish,
         handleSaveChanges,
+        handleSaveFromBar,
+        handleDiscard,
     };
 }

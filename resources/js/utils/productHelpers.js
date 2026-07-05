@@ -75,6 +75,23 @@ export function groupProductsByParent(products) {
     return Array.from(groups.values());
 }
 
+const SUMMARY_PRODUCT_PREVIEW_LIMIT = 3;
+
+export function buildProductSummary(products) {
+    const groups = groupProductsByParent(products);
+    const previewNames = groups
+        .slice(0, SUMMARY_PRODUCT_PREVIEW_LIMIT)
+        .map((group) => group.productTitle);
+    const hiddenProductCount = Math.max(0, groups.length - SUMMARY_PRODUCT_PREVIEW_LIMIT);
+
+    return {
+        productCount: groups.length,
+        variantCount: products.length,
+        previewNames,
+        hiddenProductCount,
+    };
+}
+
 export function getProductKey(product) {
     return product.variantId || product.id;
 }

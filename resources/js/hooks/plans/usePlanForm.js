@@ -10,10 +10,16 @@ import {
     PLAN_STATUS,
     PLAN_TYPES,
 } from "@/constants/planConstants";
-import { buildPlanPayload, mapPlanFromApi, validatePlanForm } from "@/utils/planHelpers";
+import { buildPlanPayload, mapPlanFromApi } from "@/utils/planHelpers";
 import { getApiErrorMessage, showToast } from "@/utils/shopifyToast";
+import { buildProductSummary } from "@/utils/productHelpers";
+import { validateAutoChargeForm } from "@/utils/planValidation";
 import { useDeliveryOptions } from "./useDeliveryOptions";
+import { useFormValidation } from "./useFormValidation";
 import { useProductPicker } from "./useProductPicker";
+import { useAutoChargeDirtyState } from "./usePlanFormDirtyState";
+
+export const AUTO_CHARGE_SAVE_BAR_ID = "plan-auto-charge-save-bar";
 
 export function usePlanForm({ planId = null, onSuccess }) {
     const isEdit = Boolean(planId);
@@ -35,6 +41,25 @@ export function usePlanForm({ planId = null, onSuccess }) {
         removeOption,
         resetOptions,
     } = useDeliveryOptions();
+
+    const {
+        validationErrors,
+        fieldErrors,
+        deliveryOptionErrors,
+        applyValidation,
+        clearValidation,
+        clearFieldError,
+    } = useFormValidation();
+
+    const { isDirty, baseline, setBaselineFromCurrent, setBaselineFromData } =
+        useAutoChargeDirtyState({
+            isEdit,
+            initialLoading,
+            planName,
+            widget,
+            products,
+            deliveryOptions,
+        });
 
     useEffect(() => {
         if (!planId) {
@@ -59,6 +84,7 @@ export function usePlanForm({ planId = null, onSuccess }) {
                 setPlanPublished(formData.published);
                 setProducts(formData.products);
                 resetOptions(formData.deliveryOptions);
+                setBaselineFromData(formData);
             } catch (error) {
                 console.error(error);
                 showToast(getApiErrorMessage(error, "Unable to load plan"), {
@@ -76,13 +102,13 @@ export function usePlanForm({ planId = null, onSuccess }) {
         return () => {
             cancelled = true;
         };
-    }, [planId, resetOptions, setProducts]);
+    }, [planId, resetOptions, setProducts, setBaselineFromData]);
 
     const summary = useMemo(
         () => ({
             widget,
             optionCount: deliveryOptions.length,
-            productNames: products.map((p) => p.title),
+            ...buildProductSummary(products),
             status: planStatus,
         }),
         [widget, deliveryOptions.length, products, planStatus]
@@ -90,14 +116,21 @@ export function usePlanForm({ planId = null, onSuccess }) {
 
     const submitPlan = useCallback(
         async ({ status, published }) => {
-            const validationErrors = validatePlanForm({
+            const validationResult = validateAutoChargeForm({
                 planName,
+                widget,
                 products,
                 deliveryOptions,
             });
+            const isValid = applyValidation(validationResult);
 
-            if (validationErrors.length) {
-                showToast(validationErrors[0], { isError: true });
+            if (!isValid) {
+                showToast(validationResult.errors[0] || "Please fix the highlighted fields.", {
+                    isError: true,
+                });
+                document
+                    .getElementById("plan-validation-banner")
+                    ?.scrollIntoView({ behavior: "smooth", block: "start" });
                 return;
             }
 
@@ -125,6 +158,8 @@ export function usePlanForm({ planId = null, onSuccess }) {
                     response.data.message ||
                         (isEdit ? "Plan updated successfully" : "Plan saved successfully")
                 );
+                setBaselineFromCurrent();
+                clearValidation();
                 onSuccess?.(response.data.data);
             } catch (error) {
                 console.error(error);
@@ -139,8 +174,18 @@ export function usePlanForm({ planId = null, onSuccess }) {
                 setLoading(false);
             }
         },
-        [planName, widget, products, deliveryOptions, isEdit, planId, onSuccess]
+        [planName, widget, products, deliveryOptions, isEdit, planId, onSuccess, setBaselineFromCurrent, applyValidation, clearValidation]
     );
+
+    const handleDiscard = useCallback(() => {
+        if (!baseline) return;
+
+        setPlanName(baseline.planName);
+        setWidget(baseline.widget);
+        setProducts(baseline.products.map((product) => ({ ...product })));
+        resetOptions(baseline.deliveryOptions.map((option) => ({ ...option })));
+        clearValidation();
+    }, [baseline, resetOptions, setProducts, clearValidation]);
 
     const handleSaveDraft = useCallback(
         () => submitPlan({ status: PLAN_STATUS.DRAFT, published: false }),
@@ -157,8 +202,23 @@ export function usePlanForm({ planId = null, onSuccess }) {
         [submitPlan, planStatus, planPublished]
     );
 
+    const handleSaveFromBar = useCallback(() => {
+        if (isEdit) {
+            handleSaveChanges();
+            return;
+        }
+
+        handleSaveDraft();
+    }, [isEdit, handleSaveChanges, handleSaveDraft]);
+
     return {
         isEdit,
+        isDirty,
+        saveBarId: AUTO_CHARGE_SAVE_BAR_ID,
+        validationErrors,
+        fieldErrors,
+        deliveryOptionErrors,
+        clearFieldError,
         planName,
         setPlanName,
         widget,
@@ -180,6 +240,8 @@ export function usePlanForm({ planId = null, onSuccess }) {
         handleSaveDraft,
         handlePublish,
         handleSaveChanges,
+        handleSaveFromBar,
+        handleDiscard,
     };
 }
 

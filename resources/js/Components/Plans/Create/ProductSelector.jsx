@@ -7,11 +7,16 @@ export default function ProductSelector({
     onSelectProducts,
     onRemoveProduct,
     onRemoveProductGroup,
+    fieldErrors = {},
 }) {
     const groups = useMemo(() => groupProductsByParent(products), [products]);
 
     return (
         <s-stack direction="block" gap="base">
+            {fieldErrors.products && (
+                <s-text tone="critical">{fieldErrors.products}</s-text>
+            )}
+
             {groups.length === 0 ? (
                 <s-box padding="base" background="subdued" borderRadius="base">
                     <s-stack direction="block" gap="small-200" alignItems="center">

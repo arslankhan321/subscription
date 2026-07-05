@@ -4,13 +4,22 @@ import ProductSelector from "@/Components/Plans/Create/ProductSelector";
 import DeliveryOptionsSection from "@/Components/Plans/Create/DeliveryOptionsSection";
 import PlanSummary from "@/Components/Plans/Create/PlanSummary";
 import PlanFormLoader from "@/Components/Plans/PlanFormLoader";
+import PlanSaveBar from "@/Components/Plans/PlanSaveBar";
+import PlanValidationBanner from "@/Components/Plans/PlanValidationBanner";
 import { usePlanForm } from "@/hooks/plans/usePlanForm";
+import { useShopifySaveBar } from "@/hooks/useShopifySaveBar";
 import { formatPlanStatus } from "@/utils/planHelpers";
 import "@/styles/plans.css";
 
 export default function PlanForm({ planId = null, onBack, onSaved }) {
     const {
         isEdit,
+        isDirty,
+        saveBarId,
+        validationErrors,
+        fieldErrors,
+        deliveryOptionErrors,
+        clearFieldError,
         planName,
         setPlanName,
         widget,
@@ -32,6 +41,8 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
         handleSaveDraft,
         handlePublish,
         handleSaveChanges,
+        handleSaveFromBar,
+        handleDiscard,
     } = usePlanForm({
         planId,
         onSuccess: () => {
@@ -40,12 +51,31 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
         },
     });
 
+    const { confirmLeave } = useShopifySaveBar({
+        id: saveBarId,
+        isDirty,
+        enabled: !initialLoading,
+    });
+
+    const handleBack = async () => {
+        await confirmLeave();
+        onBack?.();
+    };
+
     const pageHeading = isEdit ? `Edit: ${planName || "Plan"}` : planName || "New plan";
 
     return (
         <div className="plans-page">
             <s-page heading={pageHeading}>
-                <s-button slot="secondary-action" onClick={onBack}>
+                <PlanSaveBar
+                    id={saveBarId}
+                    onSave={handleSaveFromBar}
+                    onDiscard={handleDiscard}
+                    saving={loading}
+                    saveLabel={isEdit ? "Save" : "Save draft"}
+                />
+
+                <s-button slot="secondary-action" onClick={handleBack}>
                     Back to Plans
                 </s-button>
 
@@ -90,6 +120,8 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
                     ) : (
                         <div className="plan-form-layout">
                             <div className="plan-form-main">
+                                <PlanValidationBanner errors={validationErrors} />
+
                                 <div className="plan-section-card">
                                     <div className="plan-section-card__header">
                                         <span className="plan-section-card__icon">✏️</span>
@@ -98,8 +130,15 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
                                     <PlanEditor
                                         planName={planName}
                                         widget={widget}
-                                        onPlanNameChange={setPlanName}
-                                        onWidgetChange={setWidget}
+                                        fieldErrors={fieldErrors}
+                                        onPlanNameChange={(value) => {
+                                            setPlanName(value);
+                                            clearFieldError("planName");
+                                        }}
+                                        onWidgetChange={(value) => {
+                                            setWidget(value);
+                                            clearFieldError("widget");
+                                        }}
                                     />
                                 </div>
 
@@ -110,7 +149,11 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
                                     </div>
                                     <ProductSelector
                                         products={products}
-                                        onSelectProducts={handleSelectProducts}
+                                        fieldErrors={fieldErrors}
+                                        onSelectProducts={async () => {
+                                            await handleSelectProducts();
+                                            clearFieldError("products");
+                                        }}
                                         onRemoveProduct={removeProduct}
                                         onRemoveProductGroup={removeProductGroup}
                                     />
@@ -123,7 +166,12 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
                                     </div>
                                     <DeliveryOptionsSection
                                         deliveryOptions={deliveryOptions}
-                                        onUpdate={updateOption}
+                                        deliveryOptionErrors={deliveryOptionErrors}
+                                        sectionError={fieldErrors.deliveryOptions}
+                                        onUpdate={(id, patch) => {
+                                            updateOption(id, patch);
+                                            clearFieldError("deliveryOptions");
+                                        }}
                                         onToggleCollapsed={toggleCollapsed}
                                         onDuplicate={duplicateOption}
                                         onRemove={removeOption}
@@ -138,7 +186,7 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
                                     deliveryOptions={deliveryOptions}
                                     loading={loading}
                                     isEdit={isEdit}
-                                    onBack={onBack}
+                                    onBack={handleBack}
                                     onSaveDraft={handleSaveDraft}
                                     onPublish={handlePublish}
                                     onSaveChanges={handleSaveChanges}

@@ -3,6 +3,8 @@ import { EMAIL_SEND_HOUR_OPTIONS } from "@/constants/planConstants";
 export default function RecurringIntervalsSection({
     intervalUnit,
     intervalOptions,
+    intervalOptionErrors = [],
+    sectionError,
     onIntervalUnitChange,
     onIntervalChange,
     onAddInterval,
@@ -28,6 +30,8 @@ export default function RecurringIntervalsSection({
                 Your customer will be able to select one of these intervals.
             </s-text>
 
+            {sectionError && <s-text tone="critical">{sectionError}</s-text>}
+
             {intervalOptions.map((option, index) => (
                 <s-stack key={option.id} direction="inline" gap="base" alignItems="end">
                     <s-text-field
@@ -36,6 +40,7 @@ export default function RecurringIntervalsSection({
                         min="1"
                         value={option.frequency}
                         suffix={unitLabel}
+                        error={intervalOptionErrors[index]?.frequency}
                         onInput={(e) => onIntervalChange(option.id, e.target.value)}
                     />
                     {intervalOptions.length > 1 && (
@@ -81,6 +86,7 @@ export function RecurringDiscountSection({
     giveDiscount,
     discountAmount,
     discountDescription,
+    fieldErrors = {},
     onGiveDiscountChange,
     onDiscountAmountChange,
     onDiscountDescriptionChange,
@@ -104,6 +110,7 @@ export function RecurringDiscountSection({
                         max="100"
                         value={discountAmount}
                         suffix="%"
+                        error={fieldErrors.discountAmount}
                         onInput={(e) => onDiscountAmountChange(e.target.value)}
                     />
 
@@ -111,6 +118,7 @@ export function RecurringDiscountSection({
                         label="Discount description"
                         value={discountDescription}
                         details="Displayed below the subscription interval in the widget"
+                        error={fieldErrors.discountDescription}
                         onInput={(e) => onDiscountDescriptionChange(e.target.value)}
                     />
                 </s-stack>

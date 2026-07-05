@@ -1,4 +1,10 @@
 import { BILLING_TYPES } from "@/constants/planConstants";
+import {
+    validatePlanForm,
+    validateRecurringInvoiceFormErrors as validateRecurringInvoiceForm,
+} from "@/utils/planValidation";
+
+export { validatePlanForm, validateRecurringInvoiceForm };
 
 let optionIdCounter = 1;
 
@@ -80,38 +86,6 @@ export function buildPlanPayload({ planName, widget, products, deliveryOptions, 
             shippingDiscountType: option.shippingDiscountType,
         })),
     };
-}
-
-export function validatePlanForm({ planName, products, deliveryOptions }) {
-    const errors = [];
-
-    if (!planName?.trim()) {
-        errors.push("Plan name is required.");
-    }
-
-    if (!products.length) {
-        errors.push("Select at least one product.");
-    }
-
-    if (!deliveryOptions.length) {
-        errors.push("Add at least one delivery option.");
-    }
-
-    deliveryOptions.forEach((option, index) => {
-        const freq = Number(option.deliveryFrequency);
-        if (!freq || freq < 1) {
-            errors.push(`Option #${index + 1}: delivery frequency must be at least 1.`);
-        }
-
-        if (
-            option.billingType === BILLING_TYPES.PREPAID &&
-            (!option.billingFrequency || Number(option.billingFrequency) < 1)
-        ) {
-            errors.push(`Option #${index + 1}: billing frequency is required for prepaid plans.`);
-        }
-    });
-
-    return errors;
 }
 
 export function formatPlanStatus(status) {
@@ -247,35 +221,6 @@ export function buildRecurringInvoicePayload({
             discountAmount,
         }),
     };
-}
-
-export function validateRecurringInvoiceForm({
-    planName,
-    products,
-    intervalOptions,
-}) {
-    const errors = [];
-
-    if (!planName?.trim()) {
-        errors.push("Plan name is required.");
-    }
-
-    if (!products.length) {
-        errors.push("Select at least one product.");
-    }
-
-    if (!intervalOptions.length) {
-        errors.push("Add at least one subscription interval.");
-    }
-
-    intervalOptions.forEach((option, index) => {
-        const freq = Number(option.frequency);
-        if (!freq || freq < 1) {
-            errors.push(`Interval #${index + 1}: frequency must be at least 1.`);
-        }
-    });
-
-    return errors;
 }
 
 export function mapRecurringInvoiceFromApi(plan) {

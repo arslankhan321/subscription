@@ -11,6 +11,7 @@ export default function DeliveryOptionCard({
     option,
     index,
     canRemove,
+    fieldErrors = {},
     onUpdate,
     onToggleCollapsed,
     onDuplicate,
@@ -56,13 +57,20 @@ export default function DeliveryOptionCard({
             {!option.collapsed && (
                 <div className="plan-delivery-card__body">
                     <s-stack direction="block" gap="base">
-                        <s-text-field
-                            label="Name"
-                            value={option.name}
-                            placeholder="e.g. Monthly delivery"
-                            details="Leave empty to generate automatically"
-                            onInput={(e) => onUpdate(option.id, { name: e.target.value })}
-                        />
+                        <s-stack direction="block" gap="small-100">
+                            <s-text-field
+                                label="Name"
+                                value={option.name}
+                                placeholder="e.g. Monthly delivery"
+                                required
+                                error={fieldErrors.name}
+                                details="Required for every delivery option"
+                                onInput={(e) => onUpdate(option.id, { name: e.target.value })}
+                            />
+                            {fieldErrors.name && (
+                                <p className="plan-field-error">{fieldErrors.name}</p>
+                            )}
+                        </s-stack>
 
                         <s-select
                             label="Billing type"
@@ -93,6 +101,7 @@ export default function DeliveryOptionCard({
                                     type="number"
                                     min="1"
                                     value={option.deliveryFrequency}
+                                    error={fieldErrors.deliveryFrequency}
                                     onInput={(e) => {
                                         const frequency = e.target.value;
                                         onUpdate(option.id, {
@@ -132,6 +141,7 @@ export default function DeliveryOptionCard({
                                         <s-select
                                             label="Billing frequency"
                                             value={option.billingFrequency}
+                                            error={fieldErrors.billingFrequency}
                                             onChange={(e) =>
                                                 onUpdate(option.id, {
                                                     billingFrequency: e.target.value,
@@ -169,6 +179,7 @@ export default function DeliveryOptionCard({
                             <s-grid-item>
                                 <s-select
                                     label="Minimum number of orders"
+                                    details="Minimum billing cycles before the customer can cancel/pause."
                                     value={option.minOrders}
                                     onChange={(e) =>
                                         onUpdate(option.id, { minOrders: e.target.value })
@@ -184,6 +195,7 @@ export default function DeliveryOptionCard({
                             <s-grid-item>
                                 <s-select
                                     label="Maximum number of orders"
+                                    details ="Billing cycles before the subscription is cancelled automatically."
                                     value={option.maxOrders}
                                     onChange={(e) =>
                                         onUpdate(option.id, { maxOrders: e.target.value })
@@ -216,6 +228,7 @@ export default function DeliveryOptionCard({
                                         label="Discount amount"
                                         value={option.discountAmount}
                                         suffix={discountSuffix}
+                                        error={fieldErrors.discountAmount}
                                         onInput={(e) =>
                                             onUpdate(option.id, {
                                                 discountAmount: e.target.value,
