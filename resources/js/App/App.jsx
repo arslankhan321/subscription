@@ -4,6 +4,7 @@ import SideBarMenu from "../Components/SideBarMenu/SideBarMenu.jsx";
 
 const Dashboard = React.lazy(() => import("../Pages/Dashboard/Dashboard.jsx"));
 const Plans = React.lazy(() => import("../Pages/Plans/Index.jsx"));
+const Widgets = React.lazy(() => import("../Pages/Widgets/Index.jsx"));
 
 function AppRouteLoader() {
     return (
@@ -52,6 +53,7 @@ function AppRoutes() {
             <Routes>
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/plans" element={<Plans />} />
+                <Route path="/widgets" element={<Widgets />} />
             </Routes>
         </Suspense>
     );
