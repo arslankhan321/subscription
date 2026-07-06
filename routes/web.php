@@ -3,6 +3,8 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\SubscriptionPlanController;
 use App\Http\Controllers\SubscriptionWidgetController;
+use App\Http\Controllers\ShopSettingsController;
+use App\Http\Controllers\ShippingProfileController;
 
 Route::get('/', function () {
     return view('welcome');
@@ -31,6 +33,7 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
     // React App
     Route::view('/plans', 'welcome')->name('plans');
     Route::view('/widgets', 'welcome')->name('widgets');
+    Route::view('/settings', 'welcome')->name('settings');
     Route::view('/subscriptions', 'welcome')->name('subscriptions');
     Route::view('/bundles', 'welcome')->name('bundles');
     Route::view('/analytics', 'welcome')->name('analytics');
@@ -46,6 +49,24 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
         Route::get('widgets/defaults', [SubscriptionWidgetController::class, 'defaults'])
             ->name('selling.widgets.defaults');
         Route::resource('widgets', SubscriptionWidgetController::class);
+
+        Route::get('settings', [ShopSettingsController::class, 'show'])
+            ->name('selling.settings.show');
+        Route::get('settings/inventory-locations', [ShopSettingsController::class, 'inventoryLocations'])
+            ->name('selling.settings.inventory-locations');
+        Route::put('settings', [ShopSettingsController::class, 'update'])
+            ->name('selling.settings.update');
+
+        Route::get('shipping-profiles', [ShippingProfileController::class, 'index'])
+            ->name('selling.shipping-profiles.index');
+        Route::get('shipping-profiles/shopify-settings-url', [ShippingProfileController::class, 'shopifyShippingSettingsUrl'])
+            ->name('selling.shipping-profiles.shopify-settings-url');
+        Route::post('shipping-profiles', [ShippingProfileController::class, 'store'])
+            ->name('selling.shipping-profiles.store');
+        Route::put('shipping-profiles/{id}/plans', [ShippingProfileController::class, 'assignPlans'])
+            ->name('selling.shipping-profiles.assign-plans');
+        Route::delete('shipping-profiles/{id}', [ShippingProfileController::class, 'destroy'])
+            ->name('selling.shipping-profiles.destroy');
     });
 });
 

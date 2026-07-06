@@ -5,18 +5,22 @@ namespace App\Services;
 use DB;
 use App\Models\SubscriptionPlan;
 use App\Repositories\Plans\SubscriptionPlanRepositoryInterface;
+use App\Services\Shopify\ShopifyGraphqlService;
 use App\Services\Shopify\ShopifySellingPlanService;
+use App\Services\Shopify\ShopWebhookRegistrationService;
 
 class SubscriptionPlanService
 {
     public function __construct(
         protected SubscriptionPlanRepositoryInterface $repository,
-        protected ShopifySellingPlanService $shopifySellingPlanService
+        protected ShopifySellingPlanService $shopifySellingPlanService,
+        protected ShopifyGraphqlService $shopifyGraphqlService,
+        protected ShopWebhookRegistrationService $shopWebhookRegistrationService
     ) {}
 
     public function index()
     {
-        return $this->repository->all();
+        return $this->repository->all($this->shopId());
     }
 
     public function listShopifyGroups(int $first = 50, ?string $after = null): array
@@ -46,7 +50,10 @@ class SubscriptionPlanService
 
     public function create(array $data)
     {
-        return DB::transaction(function () use ($data) {
+        $shop = $this->shopifyGraphqlService->shop();
+        $shouldRegisterWebhooks = $this->shopHasPlans($shop->id);
+
+        $plan = DB::transaction(function () use ($data) {
             $plan = $this->repository->create($this->planAttributes($data));
 
             $this->syncRelations($plan, $data);
@@ -61,17 +68,23 @@ class SubscriptionPlanService
                 'options',
             ]);
         });
+
+        if ($shouldRegisterWebhooks) {
+            $this->shopWebhookRegistrationService->registerAfterFirstPlanCreated($shop);
+        }
+
+        return $plan;
     }
 
     public function show($id)
     {
-        return $this->repository->find($id);
+        return $this->repository->find($id, $this->shopId());
     }
 
     public function update($id, array $data)
     {
         return DB::transaction(function () use ($id, $data) {
-            $existingPlan = $this->repository->find($id);
+            $existingPlan = $this->repository->find($id, $this->shopId());
             $oldGroupId = $existingPlan->shopify_group_id;
             $oldSellingPlanIds = $existingPlan->options
                 ->pluck('shopify_plan_id')
@@ -79,7 +92,7 @@ class SubscriptionPlanService
                 ->values()
                 ->all();
 
-            $plan = $this->repository->update($id, array_merge(
+            $plan = $this->repository->update($id, $this->shopId(), array_merge(
                 $this->planAttributes($data, $existingPlan),
                 ['merchant_code' => $data['merchant_code'] ?? $existingPlan->merchant_code]
             ));
@@ -112,19 +125,32 @@ class SubscriptionPlanService
     public function destroy($id)
     {
         return DB::transaction(function () use ($id) {
-            $plan = $this->repository->find($id);
+            $plan = $this->repository->find($id, $this->shopId());
 
             if ($plan->shopify_group_id) {
                 $this->shopifySellingPlanService->deleteGroup($plan->shopify_group_id);
             }
 
-            return $this->repository->delete($id);
+            return $this->repository->delete($id, $this->shopId());
         });
+    }
+
+    private function shopId(): int
+    {
+        return $this->shopifyGraphqlService->shop()->id;
+    }
+
+    private function shopHasPlans(int $shopId): bool
+    {
+        return SubscriptionPlan::query()
+            ->where('shop_id', $shopId)
+            ->exists();
     }
 
     private function planAttributes(array $data, ?SubscriptionPlan $existing = null): array
     {
         return [
+            'shop_id' => $existing?->shop_id ?? $this->shopId(),
             'name' => $data['name'],
             'widget' => $data['widget'] ?? null,
             'status' => $data['status'] ?? 'draft',

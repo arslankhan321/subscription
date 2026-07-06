@@ -1,8 +1,8 @@
 <?php
+
 namespace App\Repositories\Plans;
 
 use App\Models\SubscriptionPlan;
-use App\Repositories\Plans\SubscriptionPlanRepositoryInterface;
 
 class SubscriptionPlanRepository implements SubscriptionPlanRepositoryInterface
 {
@@ -11,33 +11,38 @@ class SubscriptionPlanRepository implements SubscriptionPlanRepositoryInterface
         return SubscriptionPlan::create($data);
     }
 
-    public function update(int $id, array $data)
+    public function update(int $id, int $shopId, array $data)
     {
-        $plan = SubscriptionPlan::findOrFail($id);
+        $plan = $this->find($id, $shopId);
 
         $plan->update($data);
 
         return $plan;
     }
 
-    public function find(int $id)
+    public function find(int $id, int $shopId)
     {
         return SubscriptionPlan::with([
             'products',
-            'options'
-        ])->findOrFail($id);
+            'options',
+        ])
+            ->where('shop_id', $shopId)
+            ->findOrFail($id);
     }
 
-    public function all()
+    public function all(int $shopId)
     {
         return SubscriptionPlan::with([
             'products',
-            'options'
-        ])->latest()->paginate(10);
+            'options',
+        ])
+            ->where('shop_id', $shopId)
+            ->latest()
+            ->paginate(10);
     }
 
-    public function delete(int $id)
+    public function delete(int $id, int $shopId)
     {
-        return SubscriptionPlan::findOrFail($id)->delete();
+        return $this->find($id, $shopId)->delete();
     }
 }

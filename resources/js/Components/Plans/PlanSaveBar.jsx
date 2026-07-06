@@ -18,7 +18,7 @@ export default function PlanSaveBar({
     return (
         <ui-save-bar id={id}>
             <button type="button" variant="primary" disabled={saving} onClick={handleSave}>
-                {saveLabel}
+                {saving ? "Saving..." : saveLabel}
             </button>
             <button type="button" disabled={saving} onClick={handleDiscard}>
                 Discard

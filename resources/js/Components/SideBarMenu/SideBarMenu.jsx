@@ -33,6 +33,15 @@ const SideBarMenu = () => {
             >
                 Widgets
             </a>
+            <a
+                href="/settings"
+                onClick={(e) => {
+                    e.preventDefault();
+                    navigate(`/settings?shop=${shopDomain}&host=${app_host}`);
+                }}
+            >
+                Settings
+            </a>
         </s-app-nav>
     );
 };

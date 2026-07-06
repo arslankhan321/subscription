@@ -48,4 +48,19 @@ class User extends Authenticatable implements IShopModel
             // 'password' => 'hashed',
         ];
     }
+
+    public function subscriptionPlans()
+    {
+        return $this->hasMany(SubscriptionPlan::class, 'shop_id');
+    }
+
+    public function settings()
+    {
+        return $this->hasOne(ShopSetting::class, 'shop_id');
+    }
+
+    public function shippingProfiles()
+    {
+        return $this->hasMany(ShippingProfile::class, 'shop_id');
+    }
 }

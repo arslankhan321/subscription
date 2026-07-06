@@ -3,10 +3,12 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class SubscriptionPlan extends Model
 {
     protected $fillable = [
+        'shop_id',
         'shopify_group_id',
         'name',
         'widget',
@@ -17,6 +19,11 @@ class SubscriptionPlan extends Model
         'subscription_email_hour',
         'discount_description',
     ];
+
+    public function shop(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'shop_id');
+    }
 
     public function products()
     {
