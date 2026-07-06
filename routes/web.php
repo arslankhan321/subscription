@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\SubscriptionPlanController;
 use App\Http\Controllers\SubscriptionWidgetController;
+use App\Http\Controllers\EmailTemplateController;
 use App\Http\Controllers\ShopSettingsController;
 use App\Http\Controllers\ShippingProfileController;
 
@@ -67,6 +68,19 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
             ->name('selling.shipping-profiles.assign-plans');
         Route::delete('shipping-profiles/{id}', [ShippingProfileController::class, 'destroy'])
             ->name('selling.shipping-profiles.destroy');
+
+        Route::get('email-templates', [EmailTemplateController::class, 'index'])
+            ->name('selling.email-templates.index');
+        Route::get('email-templates/{key}', [EmailTemplateController::class, 'show'])
+            ->name('selling.email-templates.show');
+        Route::put('email-templates/{key}', [EmailTemplateController::class, 'update'])
+            ->name('selling.email-templates.update');
+        Route::post('email-templates/{key}/toggle', [EmailTemplateController::class, 'toggle'])
+            ->name('selling.email-templates.toggle');
+        Route::post('email-templates/{key}/reset', [EmailTemplateController::class, 'reset'])
+            ->name('selling.email-templates.reset');
+        Route::post('email-templates/{key}/send-test', [EmailTemplateController::class, 'sendTest'])
+            ->name('selling.email-templates.send-test');
     });
 });
 

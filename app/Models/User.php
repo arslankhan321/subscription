@@ -63,4 +63,9 @@ class User extends Authenticatable implements IShopModel
     {
         return $this->hasMany(ShippingProfile::class, 'shop_id');
     }
+
+    public function emailTemplates()
+    {
+        return $this->hasMany(ShopEmailTemplate::class, 'shop_id');
+    }
 }

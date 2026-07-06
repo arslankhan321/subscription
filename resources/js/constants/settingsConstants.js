@@ -27,7 +27,7 @@ export const SETTINGS_SECTIONS = [
         label: "Email settings",
         description: "Manage email templates",
         icon: "email",
-        available: false,
+        available: true,
     },
     {
         id: "tags",

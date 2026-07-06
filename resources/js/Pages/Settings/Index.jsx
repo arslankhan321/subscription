@@ -1,5 +1,6 @@
 import { useState } from "react";
 import PlanSaveBar from "@/Components/Plans/PlanSaveBar";
+import EmailSettingsForm from "@/Components/Settings/EmailSettingsForm";
 import GeneralSettingsForm from "@/Components/Settings/GeneralSettingsForm";
 import InventoryManagementForm from "@/Components/Settings/InventoryManagementForm";
 import PaymentRecoveryForm from "@/Components/Settings/PaymentRecoveryForm";
@@ -24,23 +25,29 @@ export default function SettingsIndex() {
         handleDiscard,
     } = useShopSettings();
 
+    const activeMeta = getSettingsSection(activeSection) ?? getSettingsSection("general");
+    const needsShopSettings = ["general", "payment-recovery", "inventory", "tags"].includes(
+        activeSection
+    );
+    const showSettingsLoading = needsShopSettings && loading;
+
     useShopifySaveBar({
         id: saveBarId,
-        isDirty,
-        enabled: !loading,
+        isDirty: needsShopSettings && isDirty,
+        enabled: needsShopSettings && !loading,
     });
-
-    const activeMeta = getSettingsSection(activeSection) ?? getSettingsSection("general");
 
     return (
         <s-page heading="Settings" inlineSize="large">
-            <PlanSaveBar
-                id={saveBarId}
-                onSave={handleSaveFromBar}
-                onDiscard={handleDiscard}
-                saving={saving}
-                saveLabel="Save"
-            />
+            {needsShopSettings && (
+                <PlanSaveBar
+                    id={saveBarId}
+                    onSave={handleSaveFromBar}
+                    onDiscard={handleDiscard}
+                    saving={saving}
+                    saveLabel="Save"
+                />
+            )}
 
             <div className="settings-shell">
                 <aside>
@@ -48,7 +55,7 @@ export default function SettingsIndex() {
                 </aside>
 
                 <main className="settings-main">
-                    {loading ? (
+                    {showSettingsLoading ? (
                         <s-text tone="subdued">Loading settings...</s-text>
                     ) : (
                         <>
@@ -60,6 +67,8 @@ export default function SettingsIndex() {
                                 />
                                 <s-heading>{activeMeta?.label}</s-heading>
                             </div>
+
+                            {activeSection === "email" && <EmailSettingsForm />}
 
                             {activeSection === "general" && (
                                 <GeneralSettingsForm
