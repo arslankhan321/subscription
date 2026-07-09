@@ -11,8 +11,6 @@ export const BILLING_TYPES = {
     PREPAID: "Prepaid",
 };
 
-export const WIDGET_OPTIONS = ["Widget", "Widget A", "Widget B"];
-
 export const PLAN_STATUS = {
     DRAFT: "draft",
     ACTIVE: "active",
@@ -20,8 +18,6 @@ export const PLAN_STATUS = {
 };
 
 export const DEFAULT_PLAN_NAME = "Plan #1";
-
-export const DEFAULT_WIDGET = "Widget";
 
 export const PLAN_TYPES = {
     AUTO_CHARGE: "auto_charge",

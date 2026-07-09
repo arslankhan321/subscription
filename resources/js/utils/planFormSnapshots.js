@@ -19,13 +19,11 @@ function normalizeDeliveryOptions(options = []) {
 
 export function buildAutoChargeSnapshot({
     planName,
-    widget,
     products,
     deliveryOptions,
 }) {
     return {
         planName: planName ?? "",
-        widget: widget ?? "",
         products: normalizeProducts(products),
         deliveryOptions: normalizeDeliveryOptions(deliveryOptions),
     };
@@ -33,7 +31,6 @@ export function buildAutoChargeSnapshot({
 
 export function buildRecurringInvoiceSnapshot({
     planName,
-    widget,
     products,
     intervalUnit,
     intervalOptions,
@@ -44,7 +41,6 @@ export function buildRecurringInvoiceSnapshot({
 }) {
     return {
         planName: planName ?? "",
-        widget: widget ?? "",
         products: normalizeProducts(products),
         intervalUnit: intervalUnit ?? "days",
         intervalOptions: clone(intervalOptions ?? []),

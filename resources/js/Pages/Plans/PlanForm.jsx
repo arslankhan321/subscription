@@ -22,8 +22,6 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
         clearFieldError,
         planName,
         setPlanName,
-        widget,
-        setWidget,
         planStatus,
         products,
         removeProduct,
@@ -129,15 +127,10 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
                                     </div>
                                     <PlanEditor
                                         planName={planName}
-                                        widget={widget}
                                         fieldErrors={fieldErrors}
                                         onPlanNameChange={(value) => {
                                             setPlanName(value);
                                             clearFieldError("planName");
-                                        }}
-                                        onWidgetChange={(value) => {
-                                            setWidget(value);
-                                            clearFieldError("widget");
                                         }}
                                     />
                                 </div>

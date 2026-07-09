@@ -117,7 +117,7 @@ export function RecurringDiscountSection({
                     <s-text-field
                         label="Discount description"
                         value={discountDescription}
-                        details="Displayed below the subscription interval in the widget"
+                        details="Displayed below the subscription interval on the product page"
                         error={fieldErrors.discountDescription}
                         onInput={(e) => onDiscountDescriptionChange(e.target.value)}
                     />

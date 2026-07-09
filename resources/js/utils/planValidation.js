@@ -19,17 +19,13 @@ function addFieldError(result, field, message) {
     }
 }
 
-function validateCommonFields(result, { planName, widget, products }) {
+function validateCommonFields(result, { planName, products }) {
     const trimmedName = planName?.trim() ?? "";
 
     if (!trimmedName) {
         addFieldError(result, "planName", "Plan name is required.");
     } else if (trimmedName.length > 255) {
         addFieldError(result, "planName", "Plan name must be 255 characters or less.");
-    }
-
-    if (!widget?.trim()) {
-        addFieldError(result, "widget", "Widget assignment is required.");
     }
 
     if (!products?.length) {
@@ -59,10 +55,10 @@ function validateDiscountAmount(result, {
     }
 }
 
-export function validateAutoChargeForm({ planName, widget, products, deliveryOptions }) {
+export function validateAutoChargeForm({ planName, products, deliveryOptions }) {
     const result = createValidationResult();
 
-    validateCommonFields(result, { planName, widget, products });
+    validateCommonFields(result, { planName, products });
 
     if (!deliveryOptions?.length) {
         addFieldError(result, "deliveryOptions", "Add at least one delivery option.");
@@ -185,7 +181,6 @@ export function validateAutoChargeForm({ planName, widget, products, deliveryOpt
 
 export function validateRecurringInvoiceForm({
     planName,
-    widget,
     products,
     intervalOptions,
     giveDiscount,
@@ -194,7 +189,7 @@ export function validateRecurringInvoiceForm({
 }) {
     const result = createValidationResult();
 
-    validateCommonFields(result, { planName, widget, products });
+    validateCommonFields(result, { planName, products });
 
     if (!intervalOptions?.length) {
         addFieldError(result, "intervalOptions", "Add at least one subscription interval.");

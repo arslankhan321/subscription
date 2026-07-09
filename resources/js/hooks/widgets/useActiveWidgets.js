@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { getActiveWidgets } from "@/Services/widgetService";
-import { DEFAULT_WIDGET } from "@/constants/planConstants";
 
 export function useActiveWidgets() {
     const [widgets, setWidgets] = useState([]);
@@ -23,9 +22,10 @@ export function useActiveWidgets() {
         fetchWidgets();
     }, [fetchWidgets]);
 
-    const widgetOptions = widgets.length
-        ? widgets.map((widget) => ({ value: widget.name, label: widget.name }))
-        : [{ value: DEFAULT_WIDGET, label: DEFAULT_WIDGET }];
+    const widgetOptions = widgets.map((widget) => ({
+        value: widget.name,
+        label: widget.name,
+    }));
 
     return {
         widgets,

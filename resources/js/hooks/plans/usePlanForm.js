@@ -6,7 +6,6 @@ import {
 } from "@/Services/planService";
 import {
     DEFAULT_PLAN_NAME,
-    DEFAULT_WIDGET,
     PLAN_STATUS,
     PLAN_TYPES,
 } from "@/constants/planConstants";
@@ -25,7 +24,6 @@ export function usePlanForm({ planId = null, onSuccess }) {
     const isEdit = Boolean(planId);
 
     const [planName, setPlanName] = useState(DEFAULT_PLAN_NAME);
-    const [widget, setWidget] = useState(DEFAULT_WIDGET);
     const [planStatus, setPlanStatus] = useState(PLAN_STATUS.DRAFT);
     const [planPublished, setPlanPublished] = useState(false);
     const [loading, setLoading] = useState(false);
@@ -56,7 +54,6 @@ export function usePlanForm({ planId = null, onSuccess }) {
             isEdit,
             initialLoading,
             planName,
-            widget,
             products,
             deliveryOptions,
         });
@@ -79,7 +76,6 @@ export function usePlanForm({ planId = null, onSuccess }) {
                 }
 
                 setPlanName(formData.planName);
-                setWidget(formData.widget);
                 setPlanStatus(formData.status);
                 setPlanPublished(formData.published);
                 setProducts(formData.products);
@@ -106,19 +102,17 @@ export function usePlanForm({ planId = null, onSuccess }) {
 
     const summary = useMemo(
         () => ({
-            widget,
             optionCount: deliveryOptions.length,
             ...buildProductSummary(products),
             status: planStatus,
         }),
-        [widget, deliveryOptions.length, products, planStatus]
+        [deliveryOptions.length, products, planStatus]
     );
 
     const submitPlan = useCallback(
         async ({ status, published }) => {
             const validationResult = validateAutoChargeForm({
                 planName,
-                widget,
                 products,
                 deliveryOptions,
             });
@@ -136,7 +130,6 @@ export function usePlanForm({ planId = null, onSuccess }) {
 
             const payload = buildPlanPayload({
                 planName,
-                widget,
                 products,
                 deliveryOptions,
                 status,
@@ -174,14 +167,13 @@ export function usePlanForm({ planId = null, onSuccess }) {
                 setLoading(false);
             }
         },
-        [planName, widget, products, deliveryOptions, isEdit, planId, onSuccess, setBaselineFromCurrent, applyValidation, clearValidation]
+        [planName, products, deliveryOptions, isEdit, planId, onSuccess, setBaselineFromCurrent, applyValidation, clearValidation]
     );
 
     const handleDiscard = useCallback(() => {
         if (!baseline) return;
 
         setPlanName(baseline.planName);
-        setWidget(baseline.widget);
         setProducts(baseline.products.map((product) => ({ ...product })));
         resetOptions(baseline.deliveryOptions.map((option) => ({ ...option })));
         clearValidation();
@@ -221,8 +213,6 @@ export function usePlanForm({ planId = null, onSuccess }) {
         clearFieldError,
         planName,
         setPlanName,
-        widget,
-        setWidget,
         planStatus,
         products,
         removeProduct,

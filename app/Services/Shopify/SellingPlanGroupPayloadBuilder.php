@@ -17,9 +17,6 @@ class SellingPlanGroupPayloadBuilder
             'merchantCode' => $merchantCode,
             'options' => ['Delivery every'],
             'position' => 1,
-            'description' => ($data['widget'] ?? $plan->widget)
-                ? 'Widget: '.($data['widget'] ?? $plan->widget)
-                : null,
             'sellingPlansToCreate' => $this->buildSellingPlans($options),
         ], fn ($value) => $value !== null);
     }
@@ -30,9 +27,6 @@ class SellingPlanGroupPayloadBuilder
             'name' => $data['name'] ?? $plan->name,
             'merchantCode' => $plan->merchant_code ?: $this->merchantCode($plan),
             'options' => ['Delivery every'],
-            'description' => ($data['widget'] ?? $plan->widget)
-                ? 'Widget: '.($data['widget'] ?? $plan->widget)
-                : null,
             'sellingPlansToCreate' => $this->buildSellingPlans($data['deliveryOptions'] ?? []),
         ], fn ($value) => $value !== null);
     }

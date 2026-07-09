@@ -88,6 +88,14 @@ class SubscriptionWidgetService
         return SubscriptionWidget::query()->where('name', $name)->first();
     }
 
+    public function findActive(): ?SubscriptionWidget
+    {
+        return SubscriptionWidget::query()
+            ->where('status', 'active')
+            ->latest('updated_at')
+            ->first();
+    }
+
     public function create(array $data): SubscriptionWidget
     {
         if (($data['status'] ?? null) === 'active') {

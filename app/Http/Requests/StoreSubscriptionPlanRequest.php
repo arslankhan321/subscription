@@ -27,7 +27,6 @@ class StoreSubscriptionPlanRequest extends FormRequest
 
             'name' => ['required', 'string', 'max:255'],
             'planType' => ['nullable', 'in:auto_charge,recurring_invoice'],
-            'widget' => ['required', 'string', 'max:255'],
 
             'subscriptionEmailHour' => ['nullable', 'string', 'max:50'],
             'discountDescription' => [
@@ -80,7 +79,6 @@ class StoreSubscriptionPlanRequest extends FormRequest
     {
         return [
             'name.required' => 'Plan name is required.',
-            'widget.required' => 'Widget assignment is required.',
             'products.required' => 'Select at least one product.',
             'products.min' => 'Select at least one product.',
             'deliveryOptions.required' => 'Add at least one delivery option or interval.',

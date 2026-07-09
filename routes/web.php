@@ -84,5 +84,9 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
     });
 });
 
+Route::get('storefront/widgets/active', [SubscriptionWidgetController::class, 'storefrontActive'])
+    ->name('storefront.widgets.active');
+Route::get('storefront/widget.css', [SubscriptionWidgetController::class, 'storefrontStyles'])
+    ->name('storefront.widget.css');
 Route::get('storefront/widgets/{name}', [SubscriptionWidgetController::class, 'storefront'])
     ->name('storefront.widgets.show');

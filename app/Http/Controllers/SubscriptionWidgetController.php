@@ -76,6 +76,20 @@ class SubscriptionWidgetController extends Controller
         ]);
     }
 
+    public function storefrontActive()
+    {
+        $widget = $this->service->findActive();
+
+        if (! $widget) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No active widget found',
+            ], 404);
+        }
+
+        return $this->storefrontResponse($widget);
+    }
+
     public function storefront(Request $request, string $name)
     {
         $widget = $this->service->findByName($name);
@@ -87,9 +101,32 @@ class SubscriptionWidgetController extends Controller
             ], 404);
         }
 
+        return $this->storefrontResponse($widget);
+    }
+
+    private function storefrontResponse($widget)
+    {
         return response()->json([
             'success' => true,
             'data' => $this->service->storefrontPayload($widget),
         ])->header('Access-Control-Allow-Origin', '*');
+    }
+
+    public function storefrontStyles()
+    {
+        $path = public_path('subscription-widget.css');
+
+        if (! is_file($path)) {
+            return response('/* subscription-widget.css not found */', 404, [
+                'Content-Type' => 'text/css; charset=UTF-8',
+                'Access-Control-Allow-Origin' => '*',
+            ]);
+        }
+
+        return response(file_get_contents($path), 200, [
+            'Content-Type' => 'text/css; charset=UTF-8',
+            'Access-Control-Allow-Origin' => '*',
+            'Cache-Control' => 'public, max-age=3600',
+        ]);
     }
 }

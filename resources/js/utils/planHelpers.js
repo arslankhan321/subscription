@@ -44,10 +44,9 @@ export function getBillingFrequencyOptions(deliveryFrequency) {
     }));
 }
 
-export function buildPlanPayload({ planName, widget, products, deliveryOptions, status, published, planType }) {
+export function buildPlanPayload({ planName, products, deliveryOptions, status, published, planType }) {
     return {
         name: planName.trim(),
-        widget,
         planType: planType ?? "auto_charge",
         status,
         published,
@@ -106,7 +105,6 @@ export function mapPlanFromApi(plan) {
 
     return {
         planName: plan.name ?? "",
-        widget: plan.widget ?? "Widget",
         status: plan.status ?? "draft",
         published: Boolean(plan.published),
         planType: plan.plan_type ?? "auto_charge",
@@ -188,7 +186,6 @@ export function buildRecurringInvoiceDeliveryOptions({
 
 export function buildRecurringInvoicePayload({
     planName,
-    widget,
     products,
     intervalUnit,
     intervalOptions,
@@ -201,7 +198,6 @@ export function buildRecurringInvoicePayload({
 }) {
     return {
         name: planName.trim(),
-        widget,
         planType: "recurring_invoice",
         subscriptionEmailHour,
         discountDescription,

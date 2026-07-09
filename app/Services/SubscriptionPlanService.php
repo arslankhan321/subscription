@@ -152,7 +152,6 @@ class SubscriptionPlanService
         return [
             'shop_id' => $existing?->shop_id ?? $this->shopId(),
             'name' => $data['name'],
-            'widget' => $data['widget'] ?? null,
             'status' => $data['status'] ?? 'draft',
             'published' => $data['published'] ?? false,
             'plan_type' => $data['planType'] ?? $existing?->plan_type ?? 'auto_charge',

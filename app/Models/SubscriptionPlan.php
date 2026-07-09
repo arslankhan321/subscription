@@ -11,7 +11,6 @@ class SubscriptionPlan extends Model
         'shop_id',
         'shopify_group_id',
         'name',
-        'widget',
         'status',
         'published',
         'merchant_code',

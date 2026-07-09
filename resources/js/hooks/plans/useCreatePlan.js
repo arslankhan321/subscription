@@ -2,7 +2,6 @@ import { useCallback, useMemo, useState } from "react";
 import { createPlan as createPlanApi } from "@/Services/planService";
 import {
     DEFAULT_PLAN_NAME,
-    DEFAULT_WIDGET,
     PLAN_STATUS,
 } from "@/constants/planConstants";
 import { buildPlanPayload } from "@/utils/planHelpers";
@@ -14,7 +13,6 @@ import { useProductPicker } from "./useProductPicker";
 
 export function useCreatePlan({ onSuccess }) {
     const [planName, setPlanName] = useState(DEFAULT_PLAN_NAME);
-    const [widget, setWidget] = useState(DEFAULT_WIDGET);
     const [loading, setLoading] = useState(false);
 
     const { products, removeProduct, removeProductGroup, handleSelectProducts } = useProductPicker();
@@ -29,18 +27,16 @@ export function useCreatePlan({ onSuccess }) {
 
     const summary = useMemo(
         () => ({
-            widget,
             optionCount: deliveryOptions.length,
             ...buildProductSummary(products),
         }),
-        [widget, deliveryOptions.length, products]
+        [deliveryOptions.length, products]
     );
 
     const submitPlan = useCallback(
         async ({ published = false } = {}) => {
             const validationResult = validateAutoChargeForm({
                 planName,
-                widget,
                 products,
                 deliveryOptions,
             });
@@ -52,7 +48,6 @@ export function useCreatePlan({ onSuccess }) {
 
             const payload = buildPlanPayload({
                 planName,
-                widget,
                 products,
                 deliveryOptions,
                 status: published ? PLAN_STATUS.ACTIVE : PLAN_STATUS.DRAFT,
@@ -73,7 +68,7 @@ export function useCreatePlan({ onSuccess }) {
                 setLoading(false);
             }
         },
-        [planName, widget, products, deliveryOptions, onSuccess]
+        [planName, products, deliveryOptions, onSuccess]
     );
 
     const handleSaveDraft = useCallback(() => submitPlan({ published: false }), [submitPlan]);
@@ -82,8 +77,6 @@ export function useCreatePlan({ onSuccess }) {
     return {
         planName,
         setPlanName,
-        widget,
-        setWidget,
         products,
         removeProduct,
         removeProductGroup,

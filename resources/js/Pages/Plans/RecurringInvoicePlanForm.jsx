@@ -24,8 +24,6 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
         clearFieldError,
         planName,
         setPlanName,
-        widget,
-        setWidget,
         planStatus,
         products,
         removeProduct,
@@ -140,15 +138,10 @@ export default function RecurringInvoicePlanForm({ planId = null, onBack, onSave
                                 <div className="plan-section-card">
                                     <PlanEditor
                                         planName={planName}
-                                        widget={widget}
                                         fieldErrors={fieldErrors}
                                         onPlanNameChange={(value) => {
                                             setPlanName(value);
                                             clearFieldError("planName");
-                                        }}
-                                        onWidgetChange={(value) => {
-                                            setWidget(value);
-                                            clearFieldError("widget");
                                         }}
                                     />
                                 </div>

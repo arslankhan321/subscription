@@ -6,7 +6,6 @@ import {
 } from "@/Services/planService";
 import {
     DEFAULT_PLAN_NAME,
-    DEFAULT_WIDGET,
     PLAN_STATUS,
 } from "@/constants/planConstants";
 import {
@@ -27,7 +26,6 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
     const isEdit = Boolean(planId);
 
     const [planName, setPlanName] = useState(DEFAULT_PLAN_NAME);
-    const [widget, setWidget] = useState(DEFAULT_WIDGET);
     const [planStatus, setPlanStatus] = useState(PLAN_STATUS.DRAFT);
     const [planPublished, setPlanPublished] = useState(false);
     const [intervalUnit, setIntervalUnit] = useState("days");
@@ -57,7 +55,6 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
             isEdit,
             initialLoading,
             planName,
-            widget,
             products,
             intervalUnit,
             intervalOptions,
@@ -81,7 +78,6 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
                 if (cancelled || !formData) return;
 
                 setPlanName(formData.planName);
-                setWidget(formData.widget);
                 setPlanStatus(formData.status);
                 setPlanPublished(formData.published);
                 setProducts(formData.products);
@@ -113,13 +109,12 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
 
     const summary = useMemo(
         () => ({
-            widget,
             optionCount: intervalOptions.length,
             ...buildProductSummary(products),
             status: planStatus,
             planType: "recurring_invoice",
         }),
-        [widget, intervalOptions.length, products, planStatus]
+        [intervalOptions.length, products, planStatus]
     );
 
     const addInterval = useCallback(() => {
@@ -140,7 +135,6 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
         async ({ status, published }) => {
             const validationResult = validateRecurringInvoiceForm({
                 planName,
-                widget,
                 products,
                 intervalOptions,
                 giveDiscount,
@@ -161,7 +155,6 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
 
             const payload = buildRecurringInvoicePayload({
                 planName,
-                widget,
                 products,
                 intervalUnit,
                 intervalOptions,
@@ -205,7 +198,6 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
         },
         [
             planName,
-            widget,
             products,
             intervalUnit,
             intervalOptions,
@@ -226,7 +218,6 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
         if (!baseline) return;
 
         setPlanName(baseline.planName);
-        setWidget(baseline.widget);
         setProducts(baseline.products.map((product) => ({ ...product })));
         setIntervalUnit(baseline.intervalUnit);
         setIntervalOptions(baseline.intervalOptions.map((option) => ({ ...option })));
@@ -271,8 +262,6 @@ export function useRecurringInvoicePlanForm({ planId = null, onSuccess }) {
         clearFieldError,
         planName,
         setPlanName,
-        widget,
-        setWidget,
         planStatus,
         products,
         removeProduct,

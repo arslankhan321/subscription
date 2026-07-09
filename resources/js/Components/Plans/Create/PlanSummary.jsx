@@ -28,11 +28,6 @@ export default function PlanSummary({
             )}
 
             <div className="plan-summary-item">
-                <s-text tone="subdued">Widget</s-text>
-                <s-text type="strong">{summary.widget}</s-text>
-            </div>
-
-            <div className="plan-summary-item">
                 <s-text tone="subdued">
                     {isLocalOnly ? "Interval options" : "Delivery options"}
                 </s-text>

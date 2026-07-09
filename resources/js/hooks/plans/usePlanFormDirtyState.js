@@ -9,7 +9,6 @@ export function useAutoChargeDirtyState({
     isEdit,
     initialLoading,
     planName,
-    widget,
     products,
     deliveryOptions,
 }) {
@@ -19,11 +18,10 @@ export function useAutoChargeDirtyState({
         () =>
             buildAutoChargeSnapshot({
                 planName,
-                widget,
                 products,
                 deliveryOptions,
             }),
-        [planName, widget, products, deliveryOptions]
+        [planName, products, deliveryOptions]
     );
 
     const isDirty = useMemo(() => {
@@ -39,7 +37,6 @@ export function useAutoChargeDirtyState({
         setBaseline(
             buildAutoChargeSnapshot({
                 planName: data.planName,
-                widget: data.widget,
                 products: data.products,
                 deliveryOptions: data.deliveryOptions,
             })
@@ -64,7 +61,6 @@ export function useRecurringInvoiceDirtyState({
     isEdit,
     initialLoading,
     planName,
-    widget,
     products,
     intervalUnit,
     intervalOptions,
@@ -79,7 +75,6 @@ export function useRecurringInvoiceDirtyState({
         () =>
             buildRecurringInvoiceSnapshot({
                 planName,
-                widget,
                 products,
                 intervalUnit,
                 intervalOptions,
@@ -90,7 +85,6 @@ export function useRecurringInvoiceDirtyState({
             }),
         [
             planName,
-            widget,
             products,
             intervalUnit,
             intervalOptions,
@@ -114,7 +108,6 @@ export function useRecurringInvoiceDirtyState({
         setBaseline(
             buildRecurringInvoiceSnapshot({
                 planName: data.planName,
-                widget: data.widget,
                 products: data.products,
                 intervalUnit: data.intervalUnit,
                 intervalOptions: data.intervalOptions,
