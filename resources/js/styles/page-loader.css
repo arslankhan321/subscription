@@ -1,0 +1,64 @@
+.page-loader,
+.app-route-loader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    width: 100%;
+    min-height: min(60vh, 420px);
+    padding: 2rem 1rem;
+    text-align: center;
+    box-sizing: border-box;
+}
+
+.page-loader--compact {
+    min-height: 160px;
+    padding: 1.25rem 0.75rem;
+}
+
+.page-loader__spinner,
+.app-route-loader__spinner,
+.plan-form-loader__spinner {
+    display: inline-block;
+    flex-shrink: 0;
+    border-radius: 50%;
+    border-style: solid;
+    border-color: #e5e7eb;
+    border-top-color: #008060;
+    animation: page-loader-spin 0.7s linear infinite;
+    margin-inline: auto;
+}
+
+.page-loader__spinner--sm,
+.app-route-loader__spinner {
+    width: 28px;
+    height: 28px;
+    border-width: 2px;
+}
+
+.page-loader__spinner--lg,
+.plan-form-loader__spinner {
+    width: 36px;
+    height: 36px;
+    border-width: 3px;
+}
+
+.page-loader__text,
+.app-route-loader__text {
+    margin: 0;
+    color: #6d7175;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.app-route-loader__text {
+    font-size: 0.8125rem;
+    color: #6b7280;
+}
+
+@keyframes page-loader-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}

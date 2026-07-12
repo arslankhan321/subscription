@@ -3,6 +3,7 @@
 namespace App\Services\Shopify;
 
 use App\Models\User;
+use App\Support\PhoneNumber;
 
 class ShopifySubscriptionContractService
 {
@@ -129,7 +130,7 @@ class ShopifySubscriptionContractService
                             legacyResourceId
                             name
                             displayFinancialStatus
-                            displayFulfillmentStatusf
+                            displayFulfillmentStatus
                             processedAt
                             createdAt
                             totalPriceSet {
@@ -356,7 +357,13 @@ class ShopifySubscriptionContractService
         $query = <<<'GQL'
         query getSubscriptionPaymentMethod($id: ID!) {
             subscriptionContract(id: $id) {
-                customerPaymentMethod(showRevoked: true) {
+                customer {
+                    id
+                    legacyResourceId
+                    displayName
+                    email
+                }
+                customerPaymentMethod(showRevoked: false) {
                     id
                     instrument {
                         ... on CustomerCreditCard {
@@ -373,6 +380,7 @@ class ShopifySubscriptionContractService
                         ... on CustomerShopPayAgreement {
                             lastDigits
                             maskedNumber
+                            name
                         }
                     }
                 }
@@ -384,12 +392,386 @@ class ShopifySubscriptionContractService
             'id' => $contractGid,
         ]);
 
-        $paymentMethod = $data['subscriptionContract']['customerPaymentMethod'] ?? null;
+        $contract = $data['subscriptionContract'] ?? null;
+        $paymentMethod = $contract['customerPaymentMethod'] ?? null;
 
         if (! is_array($paymentMethod)) {
+            return [
+                'id' => null,
+                'customer_gid' => $contract['customer']['id'] ?? null,
+                'customer_legacy_id' => $contract['customer']['legacyResourceId'] ?? null,
+                'customer_name' => $contract['customer']['displayName'] ?? null,
+                'customer_admin_url' => $this->customerAdminUrl(
+                    $shop,
+                    $contract['customer']['legacyResourceId'] ?? null
+                ),
+            ];
+        }
+
+        return array_merge(
+            $this->normalizePaymentMethod($paymentMethod),
+            [
+                'customer_gid' => $contract['customer']['id'] ?? null,
+                'customer_legacy_id' => $contract['customer']['legacyResourceId'] ?? null,
+                'customer_name' => $contract['customer']['displayName'] ?? null,
+                'customer_admin_url' => $this->customerAdminUrl(
+                    $shop,
+                    $contract['customer']['legacyResourceId'] ?? null
+                ),
+                'is_current' => true,
+            ]
+        );
+    }
+
+    public function fetchCustomerPaymentMethods(User $shop, string $customerGid, ?string $currentPaymentMethodId = null): array
+    {
+        $query = <<<'GQL'
+        query getCustomerPaymentMethods($id: ID!) {
+            customer(id: $id) {
+                id
+                displayName
+                paymentMethods(first: 20) {
+                    edges {
+                        node {
+                            id
+                            revokedAt
+                            instrument {
+                                ... on CustomerCreditCard {
+                                    brand
+                                    lastDigits
+                                    expiryMonth
+                                    expiryYear
+                                    maskedNumber
+                                    name
+                                }
+                                ... on CustomerPaypalBillingAgreement {
+                                    paypalAccountEmail
+                                }
+                                ... on CustomerShopPayAgreement {
+                                    lastDigits
+                                    maskedNumber
+                                    name
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query, [
+            'id' => $customerGid,
+        ]);
+
+        $edges = $data['customer']['paymentMethods']['edges'] ?? [];
+
+        return collect($edges)
+            ->map(function (array $edge) use ($currentPaymentMethodId) {
+                $node = $edge['node'] ?? [];
+
+                if (! empty($node['revokedAt'])) {
+                    return null;
+                }
+
+                $method = $this->normalizePaymentMethod($node);
+                $method['is_current'] = $currentPaymentMethodId !== null
+                    && ($method['id'] ?? null) === $currentPaymentMethodId;
+
+                return $method;
+            })
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    public function sendPaymentMethodUpdateEmail(User $shop, string $paymentMethodId): array
+    {
+        $mutation = <<<'GQL'
+        mutation customerPaymentMethodSendUpdateEmail($customerPaymentMethodId: ID!) {
+            customerPaymentMethodSendUpdateEmail(customerPaymentMethodId: $customerPaymentMethodId) {
+                customer {
+                    id
+                    email
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $result = $this->graphql->mutationForShop($shop, 'customerPaymentMethodSendUpdateEmail', $mutation, [
+            'customerPaymentMethodId' => $paymentMethodId,
+        ]);
+
+        return [
+            'customer_id' => $result['customer']['id'] ?? null,
+            'email' => $result['customer']['email'] ?? null,
+        ];
+    }
+
+    public function swapPaymentMethod(User $shop, string $contractGid, string $paymentMethodId): array
+    {
+        $draftId = $this->createContractDraft($shop, $contractGid);
+
+        $mutation = <<<'GQL'
+        mutation subscriptionDraftUpdate($draftId: ID!, $input: SubscriptionDraftInput!) {
+            subscriptionDraftUpdate(draftId: $draftId, input: $input) {
+                draft {
+                    id
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $this->graphql->mutationForShop($shop, 'subscriptionDraftUpdate', $mutation, [
+            'draftId' => $draftId,
+            'input' => [
+                'paymentMethodId' => $paymentMethodId,
+            ],
+        ]);
+
+        $this->commitContractDraft($shop, $draftId);
+
+        return $this->fetchPaymentMethod($shop, $contractGid) ?? [];
+    }
+
+    public function fetchShippingAddress(User $shop, string $contractGid): ?array
+    {
+        $query = <<<'GQL'
+        query getSubscriptionShippingAddress($id: ID!) {
+            subscriptionContract(id: $id) {
+                customer {
+                    id
+                    legacyResourceId
+                }
+                deliveryMethod {
+                    ... on SubscriptionDeliveryMethodShipping {
+                        __typename
+                        shippingOption {
+                            title
+                        }
+                        address {
+                            firstName
+                            lastName
+                            company
+                            address1
+                            address2
+                            city
+                            province
+                            provinceCode
+                            country
+                            countryCode
+                            zip
+                            phone
+                        }
+                    }
+                    ... on SubscriptionDeliveryMethodLocalDelivery {
+                        __typename
+                        localDeliveryOption {
+                            title
+                        }
+                        address {
+                            firstName
+                            lastName
+                            company
+                            address1
+                            address2
+                            city
+                            province
+                            provinceCode
+                            country
+                            countryCode
+                            zip
+                            phone
+                        }
+                    }
+                }
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query, [
+            'id' => $contractGid,
+        ]);
+
+        $contract = $data['subscriptionContract'] ?? null;
+        $deliveryMethod = $contract['deliveryMethod'] ?? null;
+
+        if (! is_array($deliveryMethod) || empty($deliveryMethod['address'])) {
             return null;
         }
 
+        return array_merge(
+            $this->normalizeShippingAddress($deliveryMethod['address']),
+            [
+                'delivery_method_type' => $deliveryMethod['__typename'] ?? null,
+                'shipping_option_title' => $deliveryMethod['shippingOption']['title']
+                    ?? $deliveryMethod['localDeliveryOption']['title']
+                    ?? null,
+                'customer_gid' => $contract['customer']['id'] ?? null,
+                'customer_legacy_id' => $contract['customer']['legacyResourceId'] ?? null,
+                'customer_admin_url' => $this->customerAdminUrl(
+                    $shop,
+                    $contract['customer']['legacyResourceId'] ?? null
+                ),
+            ]
+        );
+    }
+
+    public function fetchCustomerAddresses(User $shop, string $customerGid, ?array $currentShipping = null): array
+    {
+        $query = <<<'GQL'
+        query getCustomerAddresses($id: ID!) {
+            customer(id: $id) {
+                id
+                legacyResourceId
+                addressesV2(first: 50) {
+                    nodes {
+                        id
+                        firstName
+                        lastName
+                        company
+                        address1
+                        address2
+                        city
+                        province
+                        provinceCode
+                        country
+                        countryCodeV2
+                        zip
+                        phone
+                    }
+                }
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query, [
+            'id' => $customerGid,
+        ]);
+
+        $nodes = $data['customer']['addressesV2']['nodes'] ?? [];
+
+        return collect($nodes)
+            ->map(function (array $node) use ($currentShipping) {
+                $address = $this->normalizeShippingAddress($node);
+                $address['is_current'] = $this->addressesMatch($address, $currentShipping);
+
+                return $address;
+            })
+            ->values()
+            ->all();
+    }
+
+    public function updateShippingAddress(User $shop, string $contractGid, array $address): array
+    {
+        $draftId = $this->createContractDraft($shop, $contractGid);
+
+        $countryCode = strtoupper((string) ($address['country_code'] ?? ''));
+        $provinceCode = $address['province_code'] ?? null;
+        $rawPhone = trim((string) ($address['phone'] ?? ''));
+        $phone = PhoneNumber::toE164($rawPhone !== '' ? $rawPhone : null, $countryCode);
+
+        if ($rawPhone !== '' && $phone === null) {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'Phone must be a valid international number (E.164), e.g. +923001234567.'
+            );
+        }
+
+        $mailingAddress = array_filter([
+            'firstName' => $address['first_name'] ?? null,
+            'lastName' => $address['last_name'] ?? null,
+            'company' => $address['company'] ?? null,
+            'address1' => $address['address1'] ?? null,
+            'address2' => $address['address2'] ?? null,
+            'city' => $address['city'] ?? null,
+            'zip' => $address['zip'] ?? null,
+            'phone' => $phone,
+            'countryCode' => $countryCode !== '' ? $countryCode : null,
+            'provinceCode' => $provinceCode !== null && $provinceCode !== '' ? $provinceCode : null,
+        ], static fn ($value) => $value !== null && $value !== '');
+
+        $mutation = <<<'GQL'
+        mutation subscriptionDraftUpdate($draftId: ID!, $input: SubscriptionDraftInput!) {
+            subscriptionDraftUpdate(draftId: $draftId, input: $input) {
+                draft {
+                    id
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $this->graphql->mutationForShop($shop, 'subscriptionDraftUpdate', $mutation, [
+            'draftId' => $draftId,
+            'input' => [
+                'deliveryMethod' => [
+                    'shipping' => [
+                        'address' => $mailingAddress,
+                    ],
+                ],
+            ],
+        ]);
+
+        $this->commitContractDraft($shop, $draftId);
+
+        return $this->fetchShippingAddress($shop, $contractGid) ?? [];
+    }
+
+    private function normalizeShippingAddress(array $address): array
+    {
+        return [
+            'id' => $address['id'] ?? null,
+            'first_name' => $address['firstName'] ?? null,
+            'last_name' => $address['lastName'] ?? null,
+            'company' => $address['company'] ?? null,
+            'address1' => $address['address1'] ?? null,
+            'address2' => $address['address2'] ?? null,
+            'city' => $address['city'] ?? null,
+            'province' => $address['province'] ?? null,
+            'province_code' => $address['provinceCode'] ?? null,
+            'country' => $address['country'] ?? null,
+            'country_code' => $address['countryCodeV2']
+                ?? $address['countryCode']
+                ?? null,
+            'zip' => $address['zip'] ?? null,
+            'phone' => $address['phone'] ?? null,
+        ];
+    }
+
+    private function addressesMatch(?array $left, ?array $right): bool
+    {
+        if (! is_array($left) || ! is_array($right)) {
+            return false;
+        }
+
+        $normalize = static function (?string $value): string {
+            return strtolower(trim((string) $value));
+        };
+
+        $keys = ['address1', 'address2', 'city', 'zip', 'country_code', 'province_code', 'first_name', 'last_name'];
+
+        foreach ($keys as $key) {
+            if ($normalize($left[$key] ?? null) !== $normalize($right[$key] ?? null)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function normalizePaymentMethod(array $paymentMethod): array
+    {
         $instrument = $paymentMethod['instrument'] ?? [];
 
         return [
@@ -401,6 +783,1039 @@ class ShopifySubscriptionContractService
             'expiry_year' => $instrument['expiryYear'] ?? null,
             'name' => $instrument['name'] ?? null,
             'paypal_email' => $instrument['paypalAccountEmail'] ?? null,
+            'instrument_type' => $this->resolveInstrumentType($instrument),
+        ];
+    }
+
+    private function resolveInstrumentType(array $instrument): string
+    {
+        if (! empty($instrument['paypalAccountEmail'])) {
+            return 'paypal';
+        }
+
+        if (! empty($instrument['brand']) || ! empty($instrument['lastDigits'])) {
+            return 'card';
+        }
+
+        return 'other';
+    }
+
+    private function customerAdminUrl(User $shop, mixed $legacyCustomerId): ?string
+    {
+        if ($legacyCustomerId === null || $legacyCustomerId === '') {
+            return null;
+        }
+
+        $domain = $shop->name ?? null;
+
+        if (! $domain) {
+            return null;
+        }
+
+        return sprintf('https://%s/admin/customers/%s', $domain, $legacyCustomerId);
+    }
+
+    public function customerOrdersUrl(User $shop, mixed $legacyCustomerId): ?string
+    {
+        if ($legacyCustomerId === null || $legacyCustomerId === '') {
+            return null;
+        }
+
+        $domain = $shop->name ?? null;
+
+        if (! $domain) {
+            return null;
+        }
+
+        return sprintf('https://%s/admin/orders?customer_id=%s', $domain, $legacyCustomerId);
+    }
+
+    public function fetchCustomer(User $shop, string $customerGid): array
+    {
+        $query = <<<'GQL'
+        query getCustomer($id: ID!) {
+            customer(id: $id) {
+                id
+                legacyResourceId
+                email
+                firstName
+                lastName
+                phone
+                displayName
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query, [
+            'id' => $customerGid,
+        ]);
+
+        $customer = $data['customer'] ?? null;
+
+        if (! is_array($customer) || empty($customer['id'])) {
+            throw new \App\Exceptions\ShopifySellingPlanException('Customer not found in Shopify.');
+        }
+
+        $legacyId = $customer['legacyResourceId'] ?? null;
+
+        return [
+            'shopify_gid' => $customer['id'],
+            'shopify_customer_id' => $legacyId !== null ? (int) $legacyId : null,
+            'email' => $customer['email'] ?? null,
+            'first_name' => $customer['firstName'] ?? null,
+            'last_name' => $customer['lastName'] ?? null,
+            'phone' => $customer['phone'] ?? null,
+            'display_name' => $customer['displayName'] ?? null,
+            'admin_url' => $this->customerAdminUrl($shop, $legacyId),
+            'orders_url' => $this->customerOrdersUrl($shop, $legacyId),
+        ];
+    }
+
+    public function fetchDiscounts(User $shop, string $contractGid): array
+    {
+        $query = <<<'GQL'
+        query getSubscriptionDiscounts($id: ID!) {
+            subscriptionContract(id: $id) {
+                discounts(first: 50) {
+                    edges {
+                        node {
+                            id
+                            title
+                            recurringCycleLimit
+                            rejectionReason
+                            targetType
+                            type
+                            usageCount
+                            entitledLines {
+                                all
+                                lines(first: 20) {
+                                    edges {
+                                        node {
+                                            id
+                                            title
+                                        }
+                                    }
+                                }
+                            }
+                            value {
+                                ... on SubscriptionDiscountPercentageValue {
+                                    percentage
+                                }
+                                ... on SubscriptionDiscountFixedAmountValue {
+                                    amount {
+                                        amount
+                                        currencyCode
+                                    }
+                                    appliesOnEachItem
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query, [
+            'id' => $contractGid,
+        ]);
+
+        $edges = $data['subscriptionContract']['discounts']['edges'] ?? [];
+
+        return collect($edges)
+            ->map(fn (array $edge) => $this->normalizeDiscount($edge['node'] ?? []))
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    public function addDiscount(User $shop, string $contractGid, array $input): array
+    {
+        $draftId = $this->createContractDraft($shop, $contractGid);
+
+        $discountInput = [
+            'title' => $input['title'],
+            'recurringCycleLimit' => $input['recurring_cycle_limit'] ?? null,
+            'value' => $input['type'] === 'fixed'
+                ? [
+                    'fixedAmount' => [
+                        'amount' => (float) $input['amount'],
+                        'appliesOnEachItem' => false,
+                    ],
+                ]
+                : [
+                    'percentage' => (int) round((float) $input['amount']),
+                ],
+            'entitledLines' => [
+                'all' => (bool) ($input['applies_to_all'] ?? true),
+            ],
+        ];
+
+        if (! ($input['applies_to_all'] ?? true) && ! empty($input['line_id'])) {
+            $discountInput['entitledLines'] = [
+                'all' => false,
+                'lines' => [
+                    'add' => [$input['line_id']],
+                ],
+            ];
+        }
+
+        if (! ($input['limit_cycles'] ?? false)) {
+            unset($discountInput['recurringCycleLimit']);
+        }
+
+        $addMutation = <<<'GQL'
+        mutation subscriptionDraftDiscountAdd($draftId: ID!, $input: SubscriptionManualDiscountInput!) {
+            subscriptionDraftDiscountAdd(draftId: $draftId, input: $input) {
+                discountAdded {
+                    id
+                    title
+                    recurringCycleLimit
+                    usageCount
+                    type
+                    value {
+                        ... on SubscriptionDiscountPercentageValue {
+                            percentage
+                        }
+                        ... on SubscriptionDiscountFixedAmountValue {
+                            amount {
+                                amount
+                                currencyCode
+                            }
+                        }
+                    }
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $this->graphql->mutationForShop($shop, 'subscriptionDraftDiscountAdd', $addMutation, [
+            'draftId' => $draftId,
+            'input' => $discountInput,
+        ]);
+
+        $this->commitContractDraft($shop, $draftId);
+
+        return $this->fetchDiscounts($shop, $contractGid);
+    }
+
+    public function removeDiscount(User $shop, string $contractGid, string $discountId): array
+    {
+        $draftId = $this->createContractDraft($shop, $contractGid);
+
+        $mutation = <<<'GQL'
+        mutation subscriptionDraftDiscountRemove($draftId: ID!, $discountId: ID!) {
+            subscriptionDraftDiscountRemove(draftId: $draftId, discountId: $discountId) {
+                discountRemoved {
+                    ... on SubscriptionManualDiscount {
+                        id
+                        title
+                    }
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $this->graphql->mutationForShop($shop, 'subscriptionDraftDiscountRemove', $mutation, [
+            'draftId' => $draftId,
+            'discountId' => $discountId,
+        ]);
+
+        $this->commitContractDraft($shop, $draftId);
+
+        return $this->fetchDiscounts($shop, $contractGid);
+    }
+
+    public function pauseContract(User $shop, string $contractGid): array
+    {
+        return $this->updateContractStatus(
+            $shop,
+            $contractGid,
+            'subscriptionContractPause',
+            <<<'GQL'
+            mutation subscriptionContractPause($subscriptionContractId: ID!) {
+                subscriptionContractPause(subscriptionContractId: $subscriptionContractId) {
+                    contract {
+                        id
+                        status
+                    }
+                    userErrors {
+                        field
+                        message
+                    }
+                }
+            }
+            GQL
+        );
+    }
+
+    public function activateContract(User $shop, string $contractGid): array
+    {
+        return $this->updateContractStatus(
+            $shop,
+            $contractGid,
+            'subscriptionContractActivate',
+            <<<'GQL'
+            mutation subscriptionContractActivate($subscriptionContractId: ID!) {
+                subscriptionContractActivate(subscriptionContractId: $subscriptionContractId) {
+                    contract {
+                        id
+                        status
+                    }
+                    userErrors {
+                        field
+                        message
+                    }
+                }
+            }
+            GQL
+        );
+    }
+
+    public function cancelContract(User $shop, string $contractGid): array
+    {
+        return $this->updateContractStatus(
+            $shop,
+            $contractGid,
+            'subscriptionContractCancel',
+            <<<'GQL'
+            mutation subscriptionContractCancel($subscriptionContractId: ID!) {
+                subscriptionContractCancel(subscriptionContractId: $subscriptionContractId) {
+                    contract {
+                        id
+                        status
+                    }
+                    userErrors {
+                        field
+                        message
+                    }
+                }
+            }
+            GQL
+        );
+    }
+
+    private function updateContractStatus(
+        User $shop,
+        string $contractGid,
+        string $mutationName,
+        string $mutation
+    ): array {
+        $result = $this->graphql->mutationForShop($shop, $mutationName, $mutation, [
+            'subscriptionContractId' => $contractGid,
+        ]);
+
+        $status = $result['contract']['status'] ?? null;
+
+        if (! $status) {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'Unable to update subscription status on Shopify.'
+            );
+        }
+
+        return [
+            'id' => $result['contract']['id'] ?? $contractGid,
+            'status' => strtolower((string) $status),
+        ];
+    }
+
+    public function searchCustomers(User $shop, string $query, int $first = 20): array
+    {
+        $search = trim($query);
+
+        if ($search === '') {
+            return [];
+        }
+
+        $gql = <<<'GQL'
+        query searchCustomers($query: String!, $first: Int!) {
+            customers(first: $first, query: $query) {
+                edges {
+                    node {
+                        id
+                        displayName
+                        email
+                        firstName
+                        lastName
+                        phone
+                        defaultAddress {
+                            id
+                            firstName
+                            lastName
+                            company
+                            address1
+                            address2
+                            city
+                            province
+                            provinceCode
+                            country
+                            countryCodeV2
+                            zip
+                            phone
+                        }
+                    }
+                }
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $gql, [
+            'query' => $search,
+            'first' => min(50, max(1, $first)),
+        ]);
+
+        return collect($data['customers']['edges'] ?? [])
+            ->map(function (array $edge) {
+                $node = $edge['node'] ?? [];
+                $address = $node['defaultAddress'] ?? null;
+
+                return [
+                    'id' => $node['id'] ?? null,
+                    'display_name' => $node['displayName'] ?? null,
+                    'email' => $node['email'] ?? null,
+                    'first_name' => $node['firstName'] ?? null,
+                    'last_name' => $node['lastName'] ?? null,
+                    'phone' => $node['phone'] ?? null,
+                    'location' => $address
+                        ? trim(implode(', ', array_filter([
+                            $address['city'] ?? null,
+                            $address['province'] ?? null,
+                            $address['country'] ?? null,
+                        ])))
+                        : null,
+                    'default_address' => $address ? [
+                        'id' => $address['id'] ?? null,
+                        'first_name' => $address['firstName'] ?? null,
+                        'last_name' => $address['lastName'] ?? null,
+                        'company' => $address['company'] ?? null,
+                        'address1' => $address['address1'] ?? null,
+                        'address2' => $address['address2'] ?? null,
+                        'city' => $address['city'] ?? null,
+                        'province' => $address['province'] ?? null,
+                        'province_code' => $address['provinceCode'] ?? null,
+                        'country' => $address['country'] ?? null,
+                        'country_code' => $address['countryCodeV2'] ?? null,
+                        'zip' => $address['zip'] ?? null,
+                        'phone' => $address['phone'] ?? null,
+                    ] : null,
+                ];
+            })
+            ->filter(fn (array $customer) => ! empty($customer['id']))
+            ->values()
+            ->all();
+    }
+
+    public function fetchShopCurrency(User $shop): string
+    {
+        $currencies = $this->fetchShopCurrencies($shop);
+
+        return (string) ($currencies['currency_code'] ?? 'USD');
+    }
+
+    /**
+     * @return array{currency_code: string, currencies: list<array{code: string, name: string}>}
+     */
+    public function fetchShopCurrencies(User $shop): array
+    {
+        $query = <<<'GQL'
+        query shopCurrencies {
+            shop {
+                currencyCode
+                enabledPresentmentCurrencies
+                currencySettings(first: 50) {
+                    nodes {
+                        currencyCode
+                        currencyName
+                        enabled
+                    }
+                }
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query);
+        $shopData = $data['shop'] ?? [];
+        $shopCurrency = strtoupper((string) ($shopData['currencyCode'] ?? 'USD'));
+
+        $namesByCode = [];
+
+        foreach ($shopData['currencySettings']['nodes'] ?? [] as $setting) {
+            $code = strtoupper((string) ($setting['currencyCode'] ?? ''));
+
+            if ($code === '') {
+                continue;
+            }
+
+            $namesByCode[$code] = (string) ($setting['currencyName'] ?? $code);
+        }
+
+        $codes = collect([$shopCurrency])
+            ->merge($shopData['enabledPresentmentCurrencies'] ?? [])
+            ->map(fn ($code) => strtoupper((string) $code))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $currencies = $codes
+            ->map(fn (string $code) => [
+                'code' => $code,
+                'name' => $namesByCode[$code] ?? $this->currencyDisplayName($code),
+            ])
+            ->values()
+            ->all();
+
+        return [
+            'currency_code' => $shopCurrency,
+            'currencies' => $currencies,
+        ];
+    }
+
+    private function currencyDisplayName(string $code): string
+    {
+        $names = [
+            'USD' => 'United States Dollar',
+            'EUR' => 'Euro',
+            'GBP' => 'Pound Sterling',
+            'CAD' => 'Canadian Dollar',
+            'AUD' => 'Australian Dollar',
+            'INR' => 'Indian Rupee',
+            'PKR' => 'Pakistani Rupee',
+            'AED' => 'United Arab Emirates Dirham',
+            'SAR' => 'Saudi Riyal',
+            'JPY' => 'Japanese Yen',
+            'NZD' => 'New Zealand Dollar',
+            'SGD' => 'Singapore Dollar',
+            'HKD' => 'Hong Kong Dollar',
+            'CHF' => 'Swiss Franc',
+            'CNY' => 'Chinese Yuan',
+            'SEK' => 'Swedish Krona',
+            'NOK' => 'Norwegian Krone',
+            'DKK' => 'Danish Krone',
+            'MXN' => 'Mexican Peso',
+            'BRL' => 'Brazilian Real',
+            'ZAR' => 'South African Rand',
+            'TRY' => 'Turkish Lira',
+            'PLN' => 'Polish Zloty',
+            'THB' => 'Thai Baht',
+            'MYR' => 'Malaysian Ringgit',
+            'PHP' => 'Philippine Peso',
+            'IDR' => 'Indonesian Rupiah',
+            'VND' => 'Vietnamese Dong',
+            'KRW' => 'South Korean Won',
+            'EGP' => 'Egyptian Pound',
+            'NGN' => 'Nigerian Naira',
+            'KES' => 'Kenyan Shilling',
+            'GHS' => 'Ghanaian Cedi',
+            'MAD' => 'Moroccan Dirham',
+            'QAR' => 'Qatari Riyal',
+            'KWD' => 'Kuwaiti Dinar',
+            'BHD' => 'Bahraini Dinar',
+            'OMR' => 'Omani Rial',
+            'ILS' => 'Israeli New Shekel',
+            'CZK' => 'Czech Koruna',
+            'HUF' => 'Hungarian Forint',
+            'RON' => 'Romanian Leu',
+            'BGN' => 'Bulgarian Lev',
+            'HRK' => 'Croatian Kuna',
+            'RUB' => 'Russian Ruble',
+            'UAH' => 'Ukrainian Hryvnia',
+            'CLP' => 'Chilean Peso',
+            'COP' => 'Colombian Peso',
+            'ARS' => 'Argentine Peso',
+            'PEN' => 'Peruvian Sol',
+            'TWD' => 'New Taiwan Dollar',
+        ];
+
+        return $names[$code] ?? $code;
+    }
+
+    /**
+     * @param  array{
+     *   customer_id: string,
+     *   payment_method_id: string,
+     *   currency_code?: string,
+     *   next_billing_date: string,
+     *   status?: string,
+     *   billing_type?: string,
+     *   delivery_frequency: int,
+     *   delivery_interval: string,
+     *   billing_frequency?: int|null,
+     *   billing_interval?: string|null,
+     *   billing_min_cycles?: int|null,
+     *   billing_max_cycles?: int|null,
+     *   delivery_price?: float|string|null,
+     *   delivery_method_title?: string|null,
+     *   digital_product?: bool,
+     *   shipping?: array<string, mixed>|null,
+     *   lines: list<array{product_variant_id: string, quantity?: int, current_price?: float|string, selling_plan_id?: string|null, selling_plan_name?: string|null}>
+     * }  $input
+     */
+    public function createContract(User $shop, array $input): array
+    {
+        $customerId = $this->toShopifyGid($input['customer_id'] ?? '', 'Customer');
+        $paymentMethodId = (string) ($input['payment_method_id'] ?? '');
+        $lines = $input['lines'] ?? [];
+
+        if ($customerId === '' || $paymentMethodId === '') {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'Customer and payment method are required to create a subscription.'
+            );
+        }
+
+        if ($lines === []) {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'At least one product is required to create a subscription.'
+            );
+        }
+
+        $deliveryFrequency = max(1, (int) ($input['delivery_frequency'] ?? 1));
+        $deliveryInterval = $this->mapSellingPlanInterval($input['delivery_interval'] ?? 'MONTH');
+        $billingType = $input['billing_type'] ?? 'Pay as you go';
+        $isPrepaid = $billingType === 'Prepaid';
+
+        $billingFrequency = $isPrepaid
+            ? max(1, (int) ($input['billing_frequency'] ?? $deliveryFrequency))
+            : $deliveryFrequency;
+        $billingInterval = $isPrepaid
+            ? $this->mapSellingPlanInterval($input['billing_interval'] ?? $deliveryInterval)
+            : $deliveryInterval;
+
+        if ($isPrepaid && $billingFrequency % $deliveryFrequency !== 0) {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'Billing frequency must be a multiple of delivery frequency for prepaid subscriptions.'
+            );
+        }
+
+        if ($isPrepaid && $billingInterval !== $deliveryInterval) {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'Billing interval must match delivery interval for prepaid subscriptions.'
+            );
+        }
+
+        $billingPolicy = [
+            'interval' => $billingInterval,
+            'intervalCount' => $billingFrequency,
+        ];
+
+        if (isset($input['billing_min_cycles']) && $input['billing_min_cycles'] !== null && $input['billing_min_cycles'] !== '') {
+            $billingPolicy['minCycles'] = max(1, (int) $input['billing_min_cycles']);
+        }
+
+        if (isset($input['billing_max_cycles']) && $input['billing_max_cycles'] !== null && $input['billing_max_cycles'] !== '') {
+            $billingPolicy['maxCycles'] = max(1, (int) $input['billing_max_cycles']);
+        }
+
+        $contractInput = [
+            'status' => strtoupper((string) ($input['status'] ?? 'PAUSED')),
+            'paymentMethodId' => $paymentMethodId,
+            'billingPolicy' => $billingPolicy,
+            'deliveryPolicy' => [
+                'interval' => $deliveryInterval,
+                'intervalCount' => $deliveryFrequency,
+            ],
+            'deliveryPrice' => (string) ($input['delivery_price'] ?? 0),
+        ];
+
+        $isDigital = ! empty($input['digital_product']);
+        $shipping = $input['shipping'] ?? null;
+
+        if (! $isDigital && is_array($shipping) && ! empty($shipping['address1'])) {
+            $address = array_filter([
+                'firstName' => $shipping['first_name'] ?? null,
+                'lastName' => $shipping['last_name'] ?? null,
+                'company' => $shipping['company'] ?? null,
+                'address1' => $shipping['address1'] ?? null,
+                'address2' => $shipping['address2'] ?? null,
+                'city' => $shipping['city'] ?? null,
+                'province' => $shipping['province'] ?? ($shipping['province_code'] ?? null),
+                'country' => $shipping['country'] ?? ($shipping['country_code'] ?? null),
+                'zip' => $shipping['zip'] ?? null,
+                'phone' => $shipping['phone'] ?? null,
+            ], static fn ($value) => $value !== null && $value !== '');
+
+            $contractInput['deliveryMethod'] = [
+                'shipping' => [
+                    'address' => $address,
+                    'shippingOption' => [
+                        'title' => ($input['delivery_method_title'] ?? '') !== ''
+                            ? $input['delivery_method_title']
+                            : 'Subscription shipping',
+                        'code' => 'SUBSCRIPTION',
+                    ],
+                ],
+            ];
+        }
+
+        $atomicLines = [];
+
+        foreach ($lines as $line) {
+            $variantId = $this->toShopifyGid($line['product_variant_id'] ?? '', 'ProductVariant');
+
+            if ($variantId === '') {
+                continue;
+            }
+
+            $lineInput = [
+                'productVariantId' => $variantId,
+                'quantity' => max(1, (int) ($line['quantity'] ?? 1)),
+                'currentPrice' => (float) ($line['current_price'] ?? 0),
+            ];
+
+            if (! empty($line['selling_plan_id'])) {
+                $lineInput['sellingPlanId'] = $this->toShopifyGid($line['selling_plan_id'], 'SellingPlan');
+            }
+
+            if (! empty($line['selling_plan_name'])) {
+                $lineInput['sellingPlanName'] = $line['selling_plan_name'];
+            }
+
+            $atomicLines[] = ['line' => $lineInput];
+        }
+
+        if ($atomicLines === []) {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'At least one valid product variant is required.'
+            );
+        }
+
+        $mutation = <<<'GQL'
+        mutation subscriptionContractAtomicCreate($input: SubscriptionContractAtomicCreateInput!) {
+            subscriptionContractAtomicCreate(input: $input) {
+                contract {
+                    id
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $result = $this->graphql->mutationForShop($shop, 'subscriptionContractAtomicCreate', $mutation, [
+            'input' => [
+                'customerId' => $customerId,
+                'currencyCode' => strtoupper((string) ($input['currency_code'] ?? 'USD')),
+                'nextBillingDate' => $input['next_billing_date'],
+                'contract' => $contractInput,
+                'lines' => $atomicLines,
+            ],
+        ]);
+
+        $contractGid = $result['contract']['id'] ?? null;
+
+        if (! $contractGid) {
+            throw new \App\Exceptions\ShopifySellingPlanException('Unable to create subscription contract.');
+        }
+
+        return $this->fetchContract($shop, $contractGid) ?? ['id' => $contractGid];
+    }
+
+    /**
+     * Update contract lines, billing/delivery policies, and delivery price.
+     *
+     * @param  array{
+     *   billing_type?: string,
+     *   delivery_frequency: int,
+     *   delivery_interval: string,
+     *   billing_frequency?: int|null,
+     *   billing_interval?: string|null,
+     *   delivery_price?: float|null,
+     *   lines?: list<array{id: string, quantity?: int, current_price?: float|string, remove?: bool}>
+     * }  $input
+     */
+    public function updateContract(User $shop, string $contractGid, array $input): array
+    {
+        $draftId = $this->createContractDraft($shop, $contractGid);
+
+        $deliveryFrequency = max(1, (int) ($input['delivery_frequency'] ?? 1));
+        $deliveryInterval = $this->mapSellingPlanInterval($input['delivery_interval'] ?? 'MONTH');
+        $billingType = $input['billing_type'] ?? 'Pay as you go';
+        $isPrepaid = $billingType === 'Prepaid';
+
+        $billingFrequency = $isPrepaid
+            ? max(1, (int) ($input['billing_frequency'] ?? $deliveryFrequency))
+            : $deliveryFrequency;
+        $billingInterval = $isPrepaid
+            ? $this->mapSellingPlanInterval($input['billing_interval'] ?? $deliveryInterval)
+            : $deliveryInterval;
+
+        if ($isPrepaid && $billingFrequency % $deliveryFrequency !== 0) {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'Billing frequency must be a multiple of delivery frequency for prepaid subscriptions.'
+            );
+        }
+
+        if ($isPrepaid && $billingInterval !== $deliveryInterval) {
+            throw new \App\Exceptions\ShopifySellingPlanException(
+                'Billing interval must match delivery interval for prepaid subscriptions.'
+            );
+        }
+
+        $draftInput = [
+            'billingPolicy' => [
+                'interval' => $billingInterval,
+                'intervalCount' => $billingFrequency,
+            ],
+            'deliveryPolicy' => [
+                'interval' => $deliveryInterval,
+                'intervalCount' => $deliveryFrequency,
+            ],
+        ];
+
+        if (array_key_exists('delivery_price', $input) && $input['delivery_price'] !== null) {
+            $draftInput['deliveryPrice'] = (string) $input['delivery_price'];
+        }
+
+        $updateMutation = <<<'GQL'
+        mutation subscriptionDraftUpdate($draftId: ID!, $input: SubscriptionDraftInput!) {
+            subscriptionDraftUpdate(draftId: $draftId, input: $input) {
+                draft {
+                    id
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $this->graphql->mutationForShop($shop, 'subscriptionDraftUpdate', $updateMutation, [
+            'draftId' => $draftId,
+            'input' => $draftInput,
+        ]);
+
+        foreach ($input['lines'] ?? [] as $line) {
+            if (! empty($line['add']) || ! empty($line['is_new'])) {
+                $variantId = $line['product_variant_id'] ?? null;
+
+                if (! $variantId) {
+                    continue;
+                }
+
+                $variantId = $this->toShopifyGid($variantId, 'ProductVariant');
+
+                $addInput = [
+                    'productVariantId' => $variantId,
+                    'quantity' => max(1, (int) ($line['quantity'] ?? 1)),
+                    'currentPrice' => (string) ($line['current_price'] ?? 0),
+                ];
+
+                $sellingPlanId = $line['selling_plan_id'] ?? null;
+                if ($sellingPlanId) {
+                    $addInput['sellingPlanId'] = $this->toShopifyGid($sellingPlanId, 'SellingPlan');
+                }
+
+                if (! empty($line['selling_plan_name'])) {
+                    $addInput['sellingPlanName'] = $line['selling_plan_name'];
+                }
+
+                $addMutation = <<<'GQL'
+                mutation subscriptionDraftLineAdd($draftId: ID!, $input: SubscriptionLineInput!) {
+                    subscriptionDraftLineAdd(draftId: $draftId, input: $input) {
+                        lineAdded {
+                            id
+                        }
+                        userErrors {
+                            field
+                            message
+                        }
+                    }
+                }
+                GQL;
+
+                $this->graphql->mutationForShop($shop, 'subscriptionDraftLineAdd', $addMutation, [
+                    'draftId' => $draftId,
+                    'input' => $addInput,
+                ]);
+
+                continue;
+            }
+
+            $lineId = $line['id'] ?? null;
+
+            if (! $lineId || str_starts_with((string) $lineId, 'new:')) {
+                continue;
+            }
+
+            if (! empty($line['remove'])) {
+                $removeMutation = <<<'GQL'
+                mutation subscriptionDraftLineRemove($draftId: ID!, $lineId: ID!) {
+                    subscriptionDraftLineRemove(draftId: $draftId, lineId: $lineId) {
+                        lineRemoved {
+                            id
+                        }
+                        userErrors {
+                            field
+                            message
+                        }
+                    }
+                }
+                GQL;
+
+                $this->graphql->mutationForShop($shop, 'subscriptionDraftLineRemove', $removeMutation, [
+                    'draftId' => $draftId,
+                    'lineId' => $lineId,
+                ]);
+
+                continue;
+            }
+
+            $lineInput = array_filter([
+                'quantity' => isset($line['quantity']) ? (int) $line['quantity'] : null,
+                'currentPrice' => isset($line['current_price']) ? (string) $line['current_price'] : null,
+            ], static fn ($value) => $value !== null);
+
+            if ($lineInput === []) {
+                continue;
+            }
+
+            $lineUpdateMutation = <<<'GQL'
+            mutation subscriptionDraftLineUpdate($draftId: ID!, $lineId: ID!, $input: SubscriptionLineUpdateInput!) {
+                subscriptionDraftLineUpdate(draftId: $draftId, lineId: $lineId, input: $input) {
+                    lineUpdated {
+                        id
+                    }
+                    userErrors {
+                        field
+                        message
+                    }
+                }
+            }
+            GQL;
+
+            $this->graphql->mutationForShop($shop, 'subscriptionDraftLineUpdate', $lineUpdateMutation, [
+                'draftId' => $draftId,
+                'lineId' => $lineId,
+                'input' => $lineInput,
+            ]);
+        }
+
+        $this->commitContractDraft($shop, $draftId);
+
+        return $this->fetchContract($shop, $contractGid) ?? [];
+    }
+
+    private function mapSellingPlanInterval(string $interval): string
+    {
+        $normalized = strtoupper(trim($interval));
+
+        return match ($normalized) {
+            'DAY', 'DAYS' => 'DAY',
+            'WEEK', 'WEEKS' => 'WEEK',
+            'YEAR', 'YEARS' => 'YEAR',
+            'MONTH', 'MONTHS' => 'MONTH',
+            default => 'MONTH',
+        };
+    }
+
+    private function toShopifyGid(mixed $value, string $resource): string
+    {
+        $value = trim((string) $value);
+
+        if ($value === '') {
+            return $value;
+        }
+
+        if (preg_match('#gid://shopify/'.$resource.'/(\d+)$#', $value, $matches)) {
+            return 'gid://shopify/'.$resource.'/'.$matches[1];
+        }
+
+        if (preg_match('/(\d+)\s*$/', $value, $matches)) {
+            return 'gid://shopify/'.$resource.'/'.$matches[1];
+        }
+
+        return $value;
+    }
+
+    private function createContractDraft(User $shop, string $contractGid): string
+    {
+        $mutation = <<<'GQL'
+        mutation subscriptionContractUpdate($contractId: ID!) {
+            subscriptionContractUpdate(contractId: $contractId) {
+                draft {
+                    id
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $result = $this->graphql->mutationForShop($shop, 'subscriptionContractUpdate', $mutation, [
+            'contractId' => $contractGid,
+        ]);
+
+        $draftId = $result['draft']['id'] ?? null;
+
+        if (! $draftId) {
+            throw new \App\Exceptions\ShopifySellingPlanException('Unable to create subscription draft.');
+        }
+
+        return $draftId;
+    }
+
+    private function commitContractDraft(User $shop, string $draftId): void
+    {
+        $mutation = <<<'GQL'
+        mutation subscriptionDraftCommit($draftId: ID!) {
+            subscriptionDraftCommit(draftId: $draftId) {
+                contract {
+                    id
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $this->graphql->mutationForShop($shop, 'subscriptionDraftCommit', $mutation, [
+            'draftId' => $draftId,
+        ]);
+    }
+
+    private function normalizeDiscount(array $discount): ?array
+    {
+        if ($discount === [] || empty($discount['id'])) {
+            return null;
+        }
+
+        $value = $discount['value'] ?? [];
+        $lines = collect($discount['entitledLines']['lines']['edges'] ?? [])
+            ->map(fn (array $edge) => [
+                'id' => $edge['node']['id'] ?? null,
+                'title' => $edge['node']['title'] ?? null,
+            ])
+            ->filter(fn (array $line) => ! empty($line['id']))
+            ->values()
+            ->all();
+
+        return [
+            'id' => $discount['id'],
+            'title' => $discount['title'] ?? 'Discount',
+            'type' => $discount['type'] ?? null,
+            'target_type' => $discount['targetType'] ?? null,
+            'recurring_cycle_limit' => $discount['recurringCycleLimit'] ?? null,
+            'usage_count' => $discount['usageCount'] ?? 0,
+            'rejection_reason' => $discount['rejectionReason'] ?? null,
+            'applies_to_all' => (bool) ($discount['entitledLines']['all'] ?? false),
+            'lines' => $lines,
+            'percentage' => isset($value['percentage']) ? (float) $value['percentage'] : null,
+            'fixed_amount' => isset($value['amount']['amount']) ? (float) $value['amount']['amount'] : null,
+            'currency_code' => $value['amount']['currencyCode'] ?? null,
         ];
     }
 

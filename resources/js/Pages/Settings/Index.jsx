@@ -1,5 +1,6 @@
 import { useState } from "react";
 import PlanSaveBar from "@/Components/Plans/PlanSaveBar";
+import { SettingsSkeleton } from "@/Components/Skeletons";
 import EmailSettingsForm from "@/Components/Settings/EmailSettingsForm";
 import GeneralSettingsForm from "@/Components/Settings/GeneralSettingsForm";
 import InventoryManagementForm from "@/Components/Settings/InventoryManagementForm";
@@ -11,6 +12,7 @@ import { getSettingsSection } from "@/constants/settingsConstants";
 import { useShopSettings } from "@/hooks/settings/useShopSettings";
 import { useShopifySaveBar } from "@/hooks/useShopifySaveBar";
 import "@/styles/settings.css";
+import "@/styles/skeleton.css";
 
 export default function SettingsIndex() {
     const [activeSection, setActiveSection] = useState("general");
@@ -56,7 +58,7 @@ export default function SettingsIndex() {
 
                 <main className="settings-main">
                     {showSettingsLoading ? (
-                        <s-text tone="subdued">Loading settings...</s-text>
+                        <SettingsSkeleton />
                     ) : (
                         <>
                             <div className="settings-main__header">

@@ -1,8 +1,10 @@
 import WidgetEditorTabs from "@/Components/Widgets/WidgetEditorTabs";
 import WidgetLivePreview from "@/Components/Widgets/WidgetLivePreview";
+import { WidgetFormSkeleton } from "@/Components/Skeletons";
 import { getLayoutLabel } from "@/constants/widgetConstants";
 import { useWidgetForm } from "@/hooks/widgets/useWidgetForm";
 import "@/styles/widgets.css";
+import "@/styles/skeleton.css";
 
 export default function WidgetForm({ widgetId = null, initialTemplate = null, onBack }) {
     const {
@@ -24,8 +26,8 @@ export default function WidgetForm({ widgetId = null, initialTemplate = null, on
     if (initialLoading) {
         return (
             <div className="widgets-page">
-                <s-page heading="Loading widget...">
-                    <s-text tone="subdued">Please wait...</s-text>
+                <s-page heading="Widget">
+                    <WidgetFormSkeleton />
                 </s-page>
             </div>
         );

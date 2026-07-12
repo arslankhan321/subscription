@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\ShopifySellingPlanException;
+use App\Models\Customer;
 use App\Models\Subscription;
 use App\Services\Shopify\ShopifyGraphqlService;
 use App\Services\Shopify\ShopifySubscriptionContractService;
@@ -13,7 +14,8 @@ class SubscriptionService
 {
     public function __construct(
         protected ShopifyGraphqlService $shopifyGraphqlService,
-        protected ShopifySubscriptionContractService $shopifySubscriptionContractService
+        protected ShopifySubscriptionContractService $shopifySubscriptionContractService,
+        protected SubscriptionContractSyncService $subscriptionContractSyncService
     ) {}
 
     public function index(array $filters = []): array
@@ -69,15 +71,29 @@ class SubscriptionService
         $payload = $this->transformDetail($subscription);
 
         if ($subscription->shopify_gid) {
+            $shop = $subscription->shop ?? $this->shopifyGraphqlService->shop();
+
             try {
                 $payload['payment_method'] = $this->shopifySubscriptionContractService->fetchPaymentMethod(
-                    $this->shopifyGraphqlService->shop(),
+                    $shop,
                     $subscription->shopify_gid
                 );
             } catch (ShopifySellingPlanException $exception) {
                 $payload['payment_method'] = null;
                 $payload['shopify_error'] = $exception->getMessage();
             }
+
+            try {
+                $payload['discounts'] = $this->shopifySubscriptionContractService->fetchDiscounts(
+                    $shop,
+                    $subscription->shopify_gid
+                );
+            } catch (ShopifySellingPlanException $exception) {
+                $payload['discounts'] = [];
+                $payload['shopify_error'] = $exception->getMessage();
+            }
+        } else {
+            $payload['discounts'] = [];
         }
 
         return $payload;
@@ -189,12 +205,532 @@ class SubscriptionService
         );
     }
 
+    public function addDiscount(int $id, array $input): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        return $this->shopifySubscriptionContractService->addDiscount(
+            $shop,
+            $subscription->shopify_gid,
+            $input
+        );
+    }
+
+    public function removeDiscount(int $id, string $discountId): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        return $this->shopifySubscriptionContractService->removeDiscount(
+            $shop,
+            $subscription->shopify_gid,
+            $discountId
+        );
+    }
+
+    public function customerPaymentMethods(int $id): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $current = $this->shopifySubscriptionContractService->fetchPaymentMethod(
+            $shop,
+            $subscription->shopify_gid
+        );
+
+        $customerGid = $current['customer_gid']
+            ?? ($subscription->customer?->shopify_gid
+                ? $subscription->customer->shopify_gid
+                : ($subscription->customer?->shopify_customer_id
+                    ? 'gid://shopify/Customer/'.$subscription->customer->shopify_customer_id
+                    : null));
+
+        if (! $customerGid) {
+            return [
+                'current' => $current,
+                'methods' => [],
+            ];
+        }
+
+        return [
+            'current' => $current,
+            'methods' => $this->shopifySubscriptionContractService->fetchCustomerPaymentMethods(
+                $shop,
+                $customerGid,
+                $current['id'] ?? null
+            ),
+        ];
+    }
+
+    public function sendPaymentMethodUpdateEmail(int $id): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $current = $this->shopifySubscriptionContractService->fetchPaymentMethod(
+            $shop,
+            $subscription->shopify_gid
+        );
+
+        if (empty($current['id'])) {
+            throw new ShopifySellingPlanException('No payment method found on this subscription.');
+        }
+
+        return $this->shopifySubscriptionContractService->sendPaymentMethodUpdateEmail(
+            $shop,
+            $current['id']
+        );
+    }
+
+    public function swapPaymentMethod(int $id, string $paymentMethodId): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        return $this->shopifySubscriptionContractService->swapPaymentMethod(
+            $shop,
+            $subscription->shopify_gid,
+            $paymentMethodId
+        );
+    }
+
+    public function customerAddresses(int $id): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $current = $this->shopifySubscriptionContractService->fetchShippingAddress(
+            $shop,
+            $subscription->shopify_gid
+        );
+
+        $customerGid = $current['customer_gid']
+            ?? ($subscription->customer?->shopify_gid
+                ? $subscription->customer->shopify_gid
+                : ($subscription->customer?->shopify_customer_id
+                    ? 'gid://shopify/Customer/'.$subscription->customer->shopify_customer_id
+                    : null));
+
+        if (! $customerGid) {
+            return [
+                'current' => $current,
+                'addresses' => [],
+                'customer_admin_url' => null,
+            ];
+        }
+
+        return [
+            'current' => $current,
+            'addresses' => $this->shopifySubscriptionContractService->fetchCustomerAddresses(
+                $shop,
+                $customerGid,
+                $current
+            ),
+            'customer_admin_url' => $current['customer_admin_url'] ?? null,
+        ];
+    }
+
+    public function updateShippingAddress(int $id, array $address): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $updated = $this->shopifySubscriptionContractService->updateShippingAddress(
+            $shop,
+            $subscription->shopify_gid,
+            $address
+        );
+
+        if ($updated !== []) {
+            $subscription->shipping()->updateOrCreate(
+                ['subscription_id' => $subscription->id],
+                [
+                    'delivery_method_type' => $updated['delivery_method_type']
+                        ?? $subscription->shipping?->delivery_method_type,
+                    'shipping_option_title' => $updated['shipping_option_title']
+                        ?? $subscription->shipping?->shipping_option_title,
+                    'first_name' => $updated['first_name'] ?? null,
+                    'last_name' => $updated['last_name'] ?? null,
+                    'company' => $updated['company'] ?? null,
+                    'address1' => $updated['address1'] ?? null,
+                    'address2' => $updated['address2'] ?? null,
+                    'city' => $updated['city'] ?? null,
+                    'province' => $updated['province'] ?? null,
+                    'province_code' => $updated['province_code'] ?? null,
+                    'country' => $updated['country'] ?? null,
+                    'country_code' => $updated['country_code'] ?? null,
+                    'zip' => $updated['zip'] ?? null,
+                    'phone' => $updated['phone'] ?? null,
+                ]
+            );
+        }
+
+        return $updated;
+    }
+
+    public function syncCustomer(int $id): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $customer = $subscription->customer;
+
+        if (! $customer) {
+            throw new ShopifySellingPlanException('No customer is linked to this subscription.');
+        }
+
+        $customerGid = $customer->shopify_gid
+            ?: ($customer->shopify_customer_id
+                ? 'gid://shopify/Customer/'.$customer->shopify_customer_id
+                : null);
+
+        if (! $customerGid) {
+            throw new ShopifySellingPlanException('Customer is missing Shopify ID.');
+        }
+
+        $remote = $this->shopifySubscriptionContractService->fetchCustomer($shop, $customerGid);
+
+        $customer->fill([
+            'shopify_gid' => $remote['shopify_gid'] ?? $customer->shopify_gid,
+            'shopify_customer_id' => $remote['shopify_customer_id'] ?? $customer->shopify_customer_id,
+            'email' => $remote['email'] ?? $customer->email,
+            'first_name' => $remote['first_name'] ?? $customer->first_name,
+            'last_name' => $remote['last_name'] ?? $customer->last_name,
+            'phone' => $remote['phone'] ?? $customer->phone,
+        ])->save();
+
+        return $this->transformCustomer($customer->fresh());
+    }
+
+    public function create(array $payload): array
+    {
+        $shop = $this->shopifyGraphqlService->shop();
+
+        $billingType = $payload['billing_type'] ?? 'Pay as you go';
+        $isPrepaid = $billingType === 'Prepaid';
+        $deliveryFrequency = max(1, (int) ($payload['delivery_frequency'] ?? 1));
+        $deliveryInterval = (string) ($payload['delivery_interval'] ?? 'months');
+        $billingFrequency = $isPrepaid
+            ? max(1, (int) ($payload['billing_frequency'] ?? $deliveryFrequency))
+            : $deliveryFrequency;
+        $billingInterval = $isPrepaid
+            ? (string) ($payload['billing_interval'] ?? $deliveryInterval)
+            : $deliveryInterval;
+
+        if ($isPrepaid) {
+            if ($billingFrequency % $deliveryFrequency !== 0) {
+                throw new ShopifySellingPlanException(
+                    'Billing frequency must be a multiple of delivery frequency for prepaid subscriptions.'
+                );
+            }
+
+            if (strtolower($billingInterval) !== strtolower($deliveryInterval)) {
+                throw new ShopifySellingPlanException(
+                    'Billing interval must match delivery interval for prepaid subscriptions.'
+                );
+            }
+        }
+
+        $lines = $payload['lines'] ?? [];
+
+        if ($lines === []) {
+            throw new ShopifySellingPlanException('At least one product is required.');
+        }
+
+        $nextBillingDate = Carbon::parse($payload['next_billing_date'])->toIso8601String();
+
+        $contract = $this->shopifySubscriptionContractService->createContract($shop, [
+            'customer_id' => $payload['customer_id'],
+            'payment_method_id' => $payload['payment_method_id'],
+            'currency_code' => $payload['currency_code']
+                ?? $this->shopifySubscriptionContractService->fetchShopCurrency($shop),
+            'next_billing_date' => $nextBillingDate,
+            'status' => $payload['status'] ?? 'PAUSED',
+            'billing_type' => $billingType,
+            'delivery_frequency' => $deliveryFrequency,
+            'delivery_interval' => $deliveryInterval,
+            'billing_frequency' => $isPrepaid ? $billingFrequency : null,
+            'billing_interval' => $isPrepaid ? $billingInterval : null,
+            'billing_min_cycles' => $payload['billing_min_cycles'] ?? null,
+            'billing_max_cycles' => $payload['billing_max_cycles'] ?? null,
+            'delivery_price' => $payload['delivery_price'] ?? 0,
+            'delivery_method_title' => $payload['delivery_method_title'] ?? 'Subscription shipping',
+            'digital_product' => (bool) ($payload['digital_product'] ?? false),
+            'shipping' => $payload['shipping'] ?? null,
+            'lines' => $lines,
+        ]);
+
+        $contractGid = $contract['id'] ?? null;
+
+        if (! $contractGid) {
+            throw new ShopifySellingPlanException('Subscription was created in Shopify but no contract id was returned.');
+        }
+
+        $subscription = $this->subscriptionContractSyncService->syncFromContractGid($shop, $contractGid);
+
+        if ($subscription === null) {
+            throw new ShopifySellingPlanException('Subscription was created in Shopify but failed to save locally.');
+        }
+
+        return $this->show($subscription->id);
+    }
+
+    public function searchCustomers(string $query): array
+    {
+        $shop = $this->shopifyGraphqlService->shop();
+
+        return $this->shopifySubscriptionContractService->searchCustomers($shop, $query);
+    }
+
+    public function paymentMethodsForCustomer(string $customerId): array
+    {
+        $shop = $this->shopifyGraphqlService->shop();
+        $customerGid = $this->toCustomerGid($customerId);
+
+        return $this->shopifySubscriptionContractService->fetchCustomerPaymentMethods($shop, $customerGid);
+    }
+
+    public function addressesForCustomer(string $customerId): array
+    {
+        $shop = $this->shopifyGraphqlService->shop();
+        $customerGid = $this->toCustomerGid($customerId);
+
+        return $this->shopifySubscriptionContractService->fetchCustomerAddresses($shop, $customerGid);
+    }
+
+    public function createMeta(): array
+    {
+        $shop = $this->shopifyGraphqlService->shop();
+
+        return $this->shopifySubscriptionContractService->fetchShopCurrencies($shop);
+    }
+
+    private function toCustomerGid(string $customerId): string
+    {
+        $customerId = trim($customerId);
+
+        if (str_starts_with($customerId, 'gid://')) {
+            return $customerId;
+        }
+
+        return 'gid://shopify/Customer/'.$customerId;
+    }
+
+    public function pause(int $id): array
+    {
+        return $this->changeStatus($id, 'pause');
+    }
+
+    public function resume(int $id): array
+    {
+        return $this->changeStatus($id, 'resume');
+    }
+
+    public function cancel(int $id): array
+    {
+        return $this->changeStatus($id, 'cancel');
+    }
+
+    private function changeStatus(int $id, string $action): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+        $current = strtolower((string) $subscription->status);
+
+        if ($action === 'pause') {
+            if ($current !== 'active') {
+                throw new ShopifySellingPlanException('Only active subscriptions can be paused.');
+            }
+
+            $this->shopifySubscriptionContractService->pauseContract($shop, $subscription->shopify_gid);
+        } elseif ($action === 'resume') {
+            if (! in_array($current, ['paused', 'failed'], true)) {
+                throw new ShopifySellingPlanException('Only paused or failed subscriptions can be resumed.');
+            }
+
+            $this->shopifySubscriptionContractService->activateContract($shop, $subscription->shopify_gid);
+        } elseif ($action === 'cancel') {
+            if ($current === 'cancelled') {
+                throw new ShopifySellingPlanException('Subscription is already cancelled.');
+            }
+
+            $this->shopifySubscriptionContractService->cancelContract($shop, $subscription->shopify_gid);
+        } else {
+            throw new ShopifySellingPlanException('Unsupported subscription status action.');
+        }
+
+        $synced = $this->subscriptionContractSyncService->syncFromContractGid(
+            $shop,
+            $subscription->shopify_gid
+        );
+
+        if ($synced === null) {
+            // Fallback: still reflect Shopify status locally if full sync fails.
+            $fallbackStatus = match ($action) {
+                'pause' => 'paused',
+                'resume' => 'active',
+                'cancel' => 'cancelled',
+                default => $current,
+            };
+
+            $subscription->status = $fallbackStatus;
+            $subscription->save();
+
+            return $this->show($subscription->id);
+        }
+
+        return $this->show($synced->id);
+    }
+
+    public function update(int $id, array $payload): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $billingType = $payload['billing_type'] ?? 'Pay as you go';
+        $isPrepaid = $billingType === 'Prepaid';
+        $deliveryFrequency = max(1, (int) ($payload['delivery_frequency'] ?? 1));
+        $deliveryInterval = (string) ($payload['delivery_interval'] ?? 'months');
+        $billingFrequency = $isPrepaid
+            ? max(1, (int) ($payload['billing_frequency'] ?? $deliveryFrequency))
+            : $deliveryFrequency;
+        $billingInterval = $isPrepaid
+            ? (string) ($payload['billing_interval'] ?? $deliveryInterval)
+            : $deliveryInterval;
+
+        if ($isPrepaid) {
+            if ($billingFrequency < 1) {
+                throw new ShopifySellingPlanException('Billing frequency is required for prepaid subscriptions.');
+            }
+
+            if ($billingFrequency % $deliveryFrequency !== 0) {
+                throw new ShopifySellingPlanException(
+                    'Billing frequency must be a multiple of delivery frequency for prepaid subscriptions.'
+                );
+            }
+
+            if (strtolower($billingInterval) !== strtolower($deliveryInterval)) {
+                throw new ShopifySellingPlanException(
+                    'Billing interval must match delivery interval for prepaid subscriptions.'
+                );
+            }
+        }
+
+        $lines = $payload['lines'] ?? [];
+        $remaining = collect($lines)->filter(fn ($line) => empty($line['remove']))->count();
+
+        if ($remaining < 1) {
+            throw new ShopifySellingPlanException('Subscription must keep at least one line item.');
+        }
+
+        foreach ($lines as $line) {
+            if (! empty($line['add']) && empty($line['product_variant_id'])) {
+                throw new ShopifySellingPlanException('New line items require a product variant.');
+            }
+        }
+
+        $contract = $this->shopifySubscriptionContractService->updateContract(
+            $shop,
+            $subscription->shopify_gid,
+            [
+                'billing_type' => $billingType,
+                'delivery_frequency' => $deliveryFrequency,
+                'delivery_interval' => $deliveryInterval,
+                'billing_frequency' => $isPrepaid ? $billingFrequency : null,
+                'billing_interval' => $isPrepaid ? $billingInterval : null,
+                'delivery_price' => $payload['delivery_price'] ?? null,
+                'lines' => $lines,
+            ]
+        );
+
+        $this->applyContractLocally($subscription, $contract);
+
+        return $this->show($subscription->id);
+    }
+
+    private function applyContractLocally(Subscription $subscription, array $contract): void
+    {
+        if ($contract === []) {
+            return;
+        }
+
+        $billingPolicy = $contract['billingPolicy'] ?? [];
+        $deliveryPolicy = $contract['deliveryPolicy'] ?? [];
+        $deliveryPrice = $contract['deliveryPrice'] ?? [];
+
+        $subscription->fill([
+            'shopify_revision_id' => isset($contract['revisionId']) ? (int) $contract['revisionId'] : $subscription->shopify_revision_id,
+            'status' => strtolower((string) ($contract['status'] ?? $subscription->status)),
+            'currency_code' => (string) ($contract['currencyCode'] ?? $subscription->currency_code),
+            'billing_interval' => $billingPolicy['interval'] ?? $subscription->billing_interval,
+            'billing_interval_count' => $billingPolicy['intervalCount'] ?? $subscription->billing_interval_count,
+            'billing_min_cycles' => $billingPolicy['minCycles'] ?? $subscription->billing_min_cycles,
+            'billing_max_cycles' => $billingPolicy['maxCycles'] ?? $subscription->billing_max_cycles,
+            'delivery_interval' => $deliveryPolicy['interval'] ?? $subscription->delivery_interval,
+            'delivery_interval_count' => $deliveryPolicy['intervalCount'] ?? $subscription->delivery_interval_count,
+            'next_billing_date' => ! empty($contract['nextBillingDate'])
+                ? Carbon::parse($contract['nextBillingDate'])
+                : $subscription->next_billing_date,
+            'delivery_price' => $deliveryPrice['amount'] ?? $subscription->delivery_price,
+            'delivery_price_currency' => $deliveryPrice['currencyCode'] ?? $subscription->delivery_price_currency,
+            'note' => $contract['note'] ?? $subscription->note,
+            'shopify_updated_at' => ! empty($contract['updatedAt'])
+                ? Carbon::parse($contract['updatedAt'])
+                : $subscription->shopify_updated_at,
+        ])->save();
+
+        $lineIds = [];
+
+        foreach ($contract['lines']['edges'] ?? [] as $edge) {
+            $line = $edge['node'] ?? null;
+
+            if (! is_array($line) || empty($line['id'])) {
+                continue;
+            }
+
+            $lineIds[] = $line['id'];
+
+            $subscription->products()->updateOrCreate(
+                [
+                    'shopify_line_id' => $line['id'],
+                ],
+                [
+                    'shopify_product_id' => $this->gidToNumericId($line['productId'] ?? null),
+                    'shopify_variant_id' => $this->gidToNumericId($line['variantId'] ?? null),
+                    'shopify_selling_plan_id' => $this->gidToNumericId($line['sellingPlanId'] ?? null),
+                    'selling_plan_name' => $line['sellingPlanName'] ?? null,
+                    'title' => $line['title'] ?? null,
+                    'variant_title' => $line['variantTitle'] ?? null,
+                    'sku' => $line['sku'] ?? null,
+                    'quantity' => (int) ($line['quantity'] ?? 1),
+                    'current_price' => $line['currentPrice']['amount'] ?? 0,
+                    'currency_code' => $line['currentPrice']['currencyCode']
+                        ?? $subscription->currency_code,
+                    'image_url' => $line['variantImage']['url'] ?? null,
+                    'requires_shipping' => (bool) ($line['requiresShipping'] ?? true),
+                ]
+            );
+        }
+
+        if ($lineIds !== []) {
+            $subscription->products()
+                ->whereNotIn('shopify_line_id', $lineIds)
+                ->delete();
+        }
+    }
+
+    private function gidToNumericId(mixed $gid): ?int
+    {
+        if ($gid === null || $gid === '') {
+            return null;
+        }
+
+        if (is_numeric($gid)) {
+            return (int) $gid;
+        }
+
+        $parts = explode('/', (string) $gid);
+
+        return is_numeric(end($parts)) ? (int) end($parts) : null;
+    }
+
     /**
      * @return array{0: \App\Models\User, 1: Subscription}
      */
     private function shopAndSubscription(int $id): array
     {
-        $subscription = $this->findForShop($id);
+        $subscription = $this->findForShop($id, ['customer']);
 
         if (! $subscription->shopify_gid) {
             throw new ShopifySellingPlanException('Subscription contract is missing Shopify ID.');
@@ -321,6 +857,10 @@ class SubscriptionService
             'shopify_gid' => $subscription->shopify_gid,
             'shopify_origin_order_id' => $subscription->shopify_origin_order_id,
             'shopify_origin_order_gid' => $subscription->shopify_origin_order_gid,
+            'billing_interval' => $subscription->billing_interval,
+            'billing_interval_count' => $subscription->billing_interval_count,
+            'billing_min_cycles' => $subscription->billing_min_cycles,
+            'billing_max_cycles' => $subscription->billing_max_cycles,
             'delivery_interval' => $subscription->delivery_interval,
             'delivery_interval_count' => $subscription->delivery_interval_count,
             'delivery_price' => (float) ($subscription->delivery_price ?? 0),
@@ -328,14 +868,9 @@ class SubscriptionService
             'note' => $subscription->note,
             'last_billing_attempt_error_type' => $subscription->last_billing_attempt_error_type,
             'updated_at' => optional($subscription->shopify_updated_at ?? $subscription->updated_at)?->toIso8601String(),
-            'customer' => $subscription->customer ? [
-                'id' => $subscription->customer->id,
-                'shopify_customer_id' => $subscription->customer->shopify_customer_id,
-                'email' => $subscription->customer->email,
-                'first_name' => $subscription->customer->first_name,
-                'last_name' => $subscription->customer->last_name,
-                'phone' => $subscription->customer->phone,
-            ] : null,
+            'customer' => $subscription->customer
+                ? $this->transformCustomer($subscription->customer)
+                : null,
             'shipping' => $subscription->shipping ? [
                 'delivery_method_type' => $subscription->shipping->delivery_method_type,
                 'shipping_option_title' => $subscription->shipping->shipping_option_title,
@@ -351,6 +886,13 @@ class SubscriptionService
                 'country_code' => $subscription->shipping->country_code,
                 'zip' => $subscription->shipping->zip,
                 'phone' => $subscription->shipping->phone,
+                'customer_admin_url' => $subscription->customer?->shopify_customer_id
+                    ? sprintf(
+                        'https://%s/admin/customers/%s',
+                        $this->shopifyGraphqlService->shop()->name,
+                        $subscription->customer->shopify_customer_id
+                    )
+                    : null,
             ] : null,
             'recurring_orders' => $subscription->recurringOrders
                 ->sortByDesc('processed_at')
@@ -368,6 +910,10 @@ class SubscriptionService
                 ->all(),
             'products' => $subscription->products->map(fn ($product) => [
                 'id' => $product->id,
+                'shopify_line_id' => $product->shopify_line_id,
+                'shopify_product_id' => $product->shopify_product_id,
+                'shopify_variant_id' => $product->shopify_variant_id,
+                'shopify_selling_plan_id' => $product->shopify_selling_plan_id,
                 'title' => $product->title,
                 'variant_title' => $product->variant_title,
                 'sku' => $product->sku,
@@ -378,6 +924,28 @@ class SubscriptionService
                 'selling_plan_name' => $product->selling_plan_name,
             ])->values()->all(),
         ]);
+    }
+
+    private function transformCustomer(Customer $customer): array
+    {
+        $shopDomain = $this->shopifyGraphqlService->shop()->name;
+        $shopifyCustomerId = $customer->shopify_customer_id;
+
+        return [
+            'id' => $customer->id,
+            'shopify_customer_id' => $shopifyCustomerId,
+            'shopify_gid' => $customer->shopify_gid,
+            'email' => $customer->email,
+            'first_name' => $customer->first_name,
+            'last_name' => $customer->last_name,
+            'phone' => $customer->phone,
+            'admin_url' => $shopifyCustomerId
+                ? sprintf('https://%s/admin/customers/%s', $shopDomain, $shopifyCustomerId)
+                : null,
+            'orders_url' => $shopifyCustomerId
+                ? sprintf('https://%s/admin/orders?customer_id=%s', $shopDomain, $shopifyCustomerId)
+                : null,
+        ];
     }
 
     private function resolveSubscriptionType($products): string
@@ -398,12 +966,13 @@ class SubscriptionService
         }
 
         $count = max(1, (int) ($count ?? 1));
-        $label = match ($interval) {
+        $normalized = strtolower((string) $interval);
+        $label = match ($normalized) {
             'day', 'days' => $count === 1 ? 'day' : 'days',
             'week', 'weeks' => $count === 1 ? 'week' : 'weeks',
             'month', 'months' => $count === 1 ? 'month' : 'months',
             'year', 'years' => $count === 1 ? 'year' : 'years',
-            default => $interval,
+            default => $normalized,
         };
 
         return "Repeats every {$count} {$label}";

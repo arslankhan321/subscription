@@ -1,10 +1,12 @@
 import { useCallback } from "react";
+import { ShippingProfilesSkeleton } from "@/Components/Skeletons";
 import { useAssignShippingPlansModal } from "@/Components/Settings/AssignShippingPlansModal";
 import { useCreateShippingProfileModal } from "@/Components/Settings/CreateShippingProfileModal";
 import { useDeleteShippingProfileModal } from "@/Components/Settings/DeleteShippingProfileModal";
 import { useShippingProfiles } from "@/hooks/settings/useShippingProfiles";
 import { getShopifyShippingSettingsUrl } from "@/Services/shippingProfileService";
 import { getApiErrorMessage, showToast } from "@/utils/shopifyToast";
+import "@/styles/skeleton.css";
 
 function openExternalUrl(url) {
     if (url) {
@@ -112,7 +114,7 @@ export default function ShippingProfilesForm() {
             </div>
 
             {loading ? (
-                <s-text tone="subdued">Loading shipping profiles...</s-text>
+                <ShippingProfilesSkeleton />
             ) : profiles.length === 0 ? (
                 <div className="shipping-profiles__empty">
                     <div className="shipping-profiles__empty-icon" aria-hidden="true">

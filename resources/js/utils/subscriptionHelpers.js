@@ -93,9 +93,9 @@ export function formatShippingAddress(shipping) {
         shipping.company,
         shipping.address1,
         shipping.address2,
-        [shipping.city, shipping.province_code || shipping.province, shipping.zip]
+        [shipping.city, shipping.province || shipping.province_code, shipping.zip]
             .filter(Boolean)
-            .join(", "),
+            .join(" "),
         shipping.country,
         shipping.phone,
     ].filter(Boolean);
@@ -120,8 +120,88 @@ export function formatPaymentMethod(paymentMethod) {
     return brand;
 }
 
+export function discountAppliesToProduct(discount, product) {
+    if (!discount || !product) {
+        return false;
+    }
+
+    if (discount.applies_to_all) {
+        return true;
+    }
+
+    const lineId = product.shopify_line_id;
+    if (!lineId) {
+        return false;
+    }
+
+    return (discount.lines || []).some((line) => line.id === lineId);
+}
+
+export function getApplicableDiscounts(product, discounts = []) {
+    return (discounts || []).filter((discount) => discountAppliesToProduct(discount, product));
+}
+
+export function calculateProductDiscountedTotal(product, discounts = []) {
+    const quantity = Number(product?.quantity || 1);
+    const unitPrice = Number(product?.current_price || 0);
+    let total = unitPrice * quantity;
+    const originalTotal = total;
+    const applicable = getApplicableDiscounts(product, discounts);
+
+    applicable.forEach((discount) => {
+        if (discount.percentage != null) {
+            total -= total * (Number(discount.percentage) / 100);
+            return;
+        }
+
+        if (discount.fixed_amount != null) {
+            total -= Number(discount.fixed_amount);
+        }
+    });
+
+    total = Math.max(0, total);
+
+    return {
+        original_total: roundMoney(originalTotal),
+        discounted_total: roundMoney(total),
+        unit_price: roundMoney(unitPrice),
+        discounted_unit_price: roundMoney(total / Math.max(1, quantity)),
+        has_discount: applicable.length > 0 && total < originalTotal - 0.0001,
+        savings: roundMoney(Math.max(0, originalTotal - total)),
+        applicable_discounts: applicable,
+    };
+}
+
+function roundMoney(value) {
+    return Math.round((Number(value) || 0) * 100) / 100;
+}
+
+export function formatDiscountLabel(discount, currencyCode = "USD") {
+    if (!discount) {
+        return "Discount";
+    }
+
+    if (discount.percentage != null) {
+        return `${discount.percentage}% off`;
+    }
+
+    if (discount.fixed_amount != null) {
+        return `${formatMoney(discount.fixed_amount, discount.currency_code || currencyCode)} off`;
+    }
+
+    return "Discount";
+}
+
+export function goToSubscriptionCreate(navigate) {
+    navigate(buildShopifyPath("/subscriptions/create"));
+}
+
 export function goToSubscriptionDetail(navigate, id) {
     navigate(buildShopifyPath(`/subscriptions/${id}`));
+}
+
+export function goToSubscriptionEdit(navigate, id) {
+    navigate(buildShopifyPath(`/subscriptions/${id}/edit`));
 }
 
 export function goToSubscriptionsList(navigate) {

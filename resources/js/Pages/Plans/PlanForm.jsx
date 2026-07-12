@@ -3,13 +3,14 @@ import PlanEditor from "@/Components/Plans/Create/PlanEditor";
 import ProductSelector from "@/Components/Plans/Create/ProductSelector";
 import DeliveryOptionsSection from "@/Components/Plans/Create/DeliveryOptionsSection";
 import PlanSummary from "@/Components/Plans/Create/PlanSummary";
-import PlanFormLoader from "@/Components/Plans/PlanFormLoader";
+import { PlanFormSkeleton } from "@/Components/Skeletons";
 import PlanSaveBar from "@/Components/Plans/PlanSaveBar";
 import PlanValidationBanner from "@/Components/Plans/PlanValidationBanner";
 import { usePlanForm } from "@/hooks/plans/usePlanForm";
 import { useShopifySaveBar } from "@/hooks/useShopifySaveBar";
 import { formatPlanStatus } from "@/utils/planHelpers";
 import "@/styles/plans.css";
+import "@/styles/skeleton.css";
 
 export default function PlanForm({ planId = null, onBack, onSaved }) {
     const {
@@ -114,7 +115,7 @@ export default function PlanForm({ planId = null, onBack, onSaved }) {
                     </div>
 
                     {initialLoading ? (
-                        <PlanFormLoader />
+                        <PlanFormSkeleton />
                     ) : (
                         <div className="plan-form-layout">
                             <div className="plan-form-main">

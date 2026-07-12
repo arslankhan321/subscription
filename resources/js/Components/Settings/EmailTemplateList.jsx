@@ -1,3 +1,6 @@
+import { EmailTemplatesSkeleton } from "@/Components/Skeletons";
+import "@/styles/skeleton.css";
+
 function ToggleSwitch({ checked, disabled = false, onChange }) {
     return (
         <label className={`email-toggle${disabled ? " email-toggle--disabled" : ""}`}>
@@ -23,7 +26,7 @@ export default function EmailTemplateList({
     onToggle,
 }) {
     if (loading) {
-        return <s-text tone="subdued">Loading email templates...</s-text>;
+        return <EmailTemplatesSkeleton />;
     }
 
     return (

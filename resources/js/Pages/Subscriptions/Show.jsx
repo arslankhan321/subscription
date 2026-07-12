@@ -2,18 +2,45 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSubscriptionDetail } from "@/hooks/subscriptions/useSubscriptionDetail";
 import { useBillingCycles } from "@/hooks/subscriptions/useBillingCycles";
+import { useAddDiscountModal } from "@/Components/Subscriptions/AddDiscountModal";
+import { useCancelSubscriptionModal } from "@/Components/Subscriptions/CancelSubscriptionModal";
+import { CustomerCard } from "@/Components/Subscriptions/CustomerCard";
 import {
-    formatCustomerName,
+    PaymentMethodCard,
+    useSwapPaymentMethodModal,
+} from "@/Components/Subscriptions/PaymentMethodActions";
+import {
+    ShippingAddressCard,
+    useEditShippingAddressModal,
+    useSelectShippingAddressModal,
+} from "@/Components/Subscriptions/ShippingAddressActions";
+import {
+    SkeletonBlock,
+    SkeletonLine,
+    SubscriptionShowSkeleton,
+} from "@/Components/Skeletons";
+import {
+    pauseSubscription,
+    removeSubscriptionDiscount,
+    resumeSubscription,
+    sendSubscriptionPaymentMethodUpdate,
+} from "@/Services/subscriptionService";
+import {
+    calculateProductDiscountedTotal,
     formatDateTime,
+    formatDiscountLabel,
     formatMoney,
-    formatPaymentMethod,
-    formatShippingAddress,
     formatSubscriptionStatus,
     getBillingCycleStatusTone,
     getSubscriptionStatusTone,
+    goToSubscriptionEdit,
     goToSubscriptionsList,
 } from "@/utils/subscriptionHelpers";
+import { detectBillingType } from "@/utils/subscriptionEditHelpers";
+import { BILLING_TYPES } from "@/constants/planConstants";
+import { getApiErrorMessage, showToast } from "@/utils/shopifyToast";
 import "@/styles/subscriptions.css";
+import "@/styles/skeleton.css";
 
 function toDateTimeLocalValue(value) {
     if (!value) {
@@ -59,6 +86,8 @@ function BillingCyclesCard({
     error,
     hasNextPage,
     firstUnbilledIndex,
+    actionsDisabled = false,
+    isPrepaid = false,
     onLoadMore,
     onCharge,
     onSkip,
@@ -71,6 +100,10 @@ function BillingCyclesCard({
     const [rescheduleMax, setRescheduleMax] = useState("");
 
     const openReschedule = (cycle) => {
+        if (actionsDisabled || isPrepaid) {
+            return;
+        }
+
         const minValue = toDateTimeLocalValue(cycle.cycle_start_at);
         const maxValue = toDateTimeLocalValue(
             cycle.cycle_end_at || cycle.billing_attempt_expected_date
@@ -88,7 +121,7 @@ function BillingCyclesCard({
     };
 
     const submitReschedule = async (cycleIndex) => {
-        if (!rescheduleValue) {
+        if (!rescheduleValue || actionsDisabled || isPrepaid) {
             return;
         }
 
@@ -114,27 +147,45 @@ function BillingCyclesCard({
             </div>
             <div className="subscription-card__body">
                 {loading ? (
-                    <s-box padding="base">
-                        <s-spinner accessibilityLabel="Loading billing schedule" size="base" />
-                    </s-box>
+                    <div className="skeleton-card">
+                        <SkeletonLine width="40%" height={10} />
+                        <SkeletonBlock width="100%" height={56} radius={12} />
+                        <SkeletonBlock width="100%" height={56} radius={12} />
+                        <SkeletonBlock width="100%" height={56} radius={12} />
+                    </div>
                 ) : error ? (
                     <s-banner tone="warning">{error}</s-banner>
                 ) : !billingCycles?.length ? (
                     <p className="subscription-address-line">No billing cycles available yet.</p>
                 ) : (
                     <>
+                        {actionsDisabled && (
+                            <s-banner tone="warning">
+                                Billing actions are disabled while this subscription is paused or
+                                cancelled.
+                            </s-banner>
+                        )}
                         <div className="billing-cycle-list">
                             {billingCycles.map((cycle) => {
-                                const canCharge =
+                                const isChargeableCycle =
                                     firstUnbilledIndex !== null &&
                                     cycle.cycle_index === firstUnbilledIndex &&
                                     isUnbilledCycle(cycle);
-                                const isBusy = Boolean(actionLoading);
+                                const showCharge = isChargeableCycle;
+                                const isBusy = Boolean(actionLoading) || actionsDisabled;
                                 const cycleBusy = actionLoading?.endsWith(`-${cycle.cycle_index}`);
                                 const minValue = toDateTimeLocalValue(cycle.cycle_start_at);
                                 const maxValue = toDateTimeLocalValue(
                                     cycle.cycle_end_at || cycle.billing_attempt_expected_date
                                 );
+                                const showScheduleActions = !isPrepaid;
+                                const showReschedule =
+                                    showScheduleActions &&
+                                    !cycle.skipped &&
+                                    String(cycle.status || "").toUpperCase() !== "BILLED";
+                                const showSkipToggle =
+                                    showScheduleActions &&
+                                    String(cycle.status || "").toUpperCase() !== "BILLED";
 
                                 return (
                                     <div key={cycle.cycle_index} className="billing-cycle-row">
@@ -143,18 +194,17 @@ function BillingCyclesCard({
                                         </span>
 
                                         <div className="billing-cycle-row__main">
-                                            {!cycle.skipped &&
-                                                String(cycle.status || "").toUpperCase() !== "BILLED" && (
-                                                    <button
-                                                        type="button"
-                                                        className="billing-cycle-row__reschedule"
-                                                        disabled={isBusy}
-                                                        onClick={() => openReschedule(cycle)}
-                                                    >
-                                                        <s-icon type="calendar" />
-                                                        Reschedule
-                                                    </button>
-                                                )}
+                                            {showReschedule && (
+                                                <button
+                                                    type="button"
+                                                    className="billing-cycle-row__reschedule"
+                                                    disabled={isBusy}
+                                                    onClick={() => openReschedule(cycle)}
+                                                >
+                                                    <s-icon type="calendar" />
+                                                    Reschedule
+                                                </button>
+                                            )}
 
                                             <p className="billing-cycle-row__date">
                                                 {formatDateTime(cycle.billing_attempt_expected_date)}
@@ -166,7 +216,9 @@ function BillingCyclesCard({
                                                 </p>
                                             )}
 
-                                            {rescheduleIndex === cycle.cycle_index && (
+                                            {showScheduleActions &&
+                                                !actionsDisabled &&
+                                                rescheduleIndex === cycle.cycle_index && (
                                                 <div className="billing-cycle-row__reschedule-form">
                                                     <input
                                                         type="datetime-local"
@@ -228,7 +280,7 @@ function BillingCyclesCard({
 
                                         <div className="billing-cycle-row__side">
                                             <div className="billing-cycle-row__actions-mid">
-                                                {canCharge && (
+                                                {showCharge && (
                                                     <s-button
                                                         disabled={isBusy}
                                                         loading={
@@ -254,7 +306,7 @@ function BillingCyclesCard({
                                                 </s-badge>
                                             </div>
 
-                                            {String(cycle.status || "").toUpperCase() !== "BILLED" &&
+                                            {showSkipToggle &&
                                                 (cycle.skipped ? (
                                                     <button
                                                         type="button"
@@ -307,7 +359,8 @@ function BillingCyclesCard({
 export default function SubscriptionShow() {
     const navigate = useNavigate();
     const { id } = useParams();
-    const { subscription, loading, error } = useSubscriptionDetail(id);
+    const { subscription, loading, error, refetch, setSubscriptionData, setDiscounts, setPaymentMethod, setShipping, setCustomer } =
+        useSubscriptionDetail(id);
     const {
         cycles: billingCycles,
         pageInfo,
@@ -323,13 +376,147 @@ export default function SubscriptionShow() {
         rescheduleCycle,
     } = useBillingCycles(id, { enabled: Boolean(id) });
 
+    const { open: openDiscountModal, modal: discountModal } = useAddDiscountModal({
+        subscriptionId: id,
+        products: subscription?.products ?? [],
+        onAdded: setDiscounts,
+    });
+    const { open: openSwapPaymentModal, modal: swapPaymentModal } = useSwapPaymentMethodModal({
+        subscriptionId: id,
+        onSwapped: setPaymentMethod,
+    });
+    const { open: openSelectAddressModal, modal: selectAddressModal } =
+        useSelectShippingAddressModal({
+            subscriptionId: id,
+            onUpdated: setShipping,
+        });
+    const { open: openEditAddressModal, modal: editAddressModal } = useEditShippingAddressModal({
+        subscriptionId: id,
+        shipping: subscription?.shipping,
+        onUpdated: setShipping,
+    });
+    const { open: openCancelModal, modal: cancelModal, cancelling } = useCancelSubscriptionModal({
+        onCancelled: (data) => {
+            if (data) {
+                setSubscriptionData(data);
+            } else {
+                refetch({ silent: true });
+            }
+        },
+    });
+    const [deletingDiscountId, setDeletingDiscountId] = useState(null);
+    const [sendingPaymentUpdate, setSendingPaymentUpdate] = useState(false);
+    const [statusAction, setStatusAction] = useState(null);
+
+    const status = String(subscription?.status || "").toLowerCase();
+    const canPause = status === "active";
+    const canResume = status === "paused" || status === "failed";
+    const canCancel = status !== "cancelled" && status !== "expired";
+    const canEdit = status !== "cancelled" && status !== "expired";
+    const actionsBusy = Boolean(statusAction) || cancelling;
+    const billingActionsDisabled =
+        status === "paused" || status === "cancelled" || status === "expired";
+    const isPrepaid =
+        detectBillingType(subscription) === BILLING_TYPES.PREPAID;
+
+    const handleStatusAction = async (action) => {
+        if (!id || statusAction || action === "cancel") {
+            return;
+        }
+
+        setStatusAction(action);
+
+        try {
+            const response =
+                action === "pause"
+                    ? await pauseSubscription(id)
+                    : await resumeSubscription(id);
+
+            showToast(
+                response.data?.message ||
+                    (action === "pause"
+                        ? "Subscription paused"
+                        : "Subscription resumed")
+            );
+
+            if (response.data?.data) {
+                setSubscriptionData(response.data.data);
+            } else {
+                await refetch({ silent: true });
+            }
+        } catch (err) {
+            showToast(
+                getApiErrorMessage(
+                    err,
+                    action === "pause"
+                        ? "Unable to pause subscription"
+                        : "Unable to resume subscription"
+                ),
+                { isError: true }
+            );
+        } finally {
+            setStatusAction(null);
+        }
+    };
+
+    const handleDeleteDiscount = async (discountId) => {
+        if (!id || !discountId || deletingDiscountId) {
+            return;
+        }
+
+        setDeletingDiscountId(discountId);
+
+        try {
+            const response = await removeSubscriptionDiscount(id, discountId);
+            setDiscounts(response.data?.data ?? []);
+            showToast(response.data?.message || "Discount removed");
+        } catch (err) {
+            showToast(getApiErrorMessage(err, "Unable to remove discount"), { isError: true });
+        } finally {
+            setDeletingDiscountId(null);
+        }
+    };
+
+    const handleSendPaymentUpdate = async () => {
+        if (!id || sendingPaymentUpdate) {
+            return;
+        }
+
+        setSendingPaymentUpdate(true);
+
+        try {
+            const response = await sendSubscriptionPaymentMethodUpdate(id);
+            showToast(response.data?.message || "Update link sent");
+        } catch (err) {
+            showToast(getApiErrorMessage(err, "Unable to send update link"), { isError: true });
+        } finally {
+            setSendingPaymentUpdate(false);
+        }
+    };
+
+    const handleManageCustomerPayment = () => {
+        const url = subscription?.payment_method?.customer_admin_url;
+        if (url) {
+            window.open(url, "_blank", "noopener,noreferrer");
+        }
+    };
+
+    const handleManageCustomerAddresses = () => {
+        const url =
+            subscription?.customer?.admin_url ||
+            subscription?.shipping?.customer_admin_url ||
+            subscription?.payment_method?.customer_admin_url;
+
+        if (url) {
+            window.open(url, "_blank", "noopener,noreferrer");
+        }
+    };
+
     if (loading) {
         return (
             <div className="subscriptions-page">
                 <s-page heading="Subscription">
-                    <s-box padding="large">
-                        <s-spinner accessibilityLabel="Loading subscription" size="large" />
-                    </s-box>
+                    <SubscriptionShowSkeleton />
                 </s-page>
             </div>
         );
@@ -347,8 +534,6 @@ export default function SubscriptionShow() {
             </div>
         );
     }
-
-    const shippingLines = formatShippingAddress(subscription.shipping);
 
     return (
         <div className="subscriptions-page">
@@ -372,11 +557,43 @@ export default function SubscriptionShow() {
                     </div>
 
                     <div className="subscription-detail-header__actions">
-                        <s-button disabled>Pause subscription</s-button>
-                        <s-button disabled>Cancel subscription</s-button>
-                        <s-button variant="primary" disabled>
-                            Edit subscription
-                        </s-button>
+                        {canPause && (
+                            <s-button
+                                loading={statusAction === "pause"}
+                                disabled={actionsBusy}
+                                onClick={() => handleStatusAction("pause")}
+                            >
+                                Pause subscription
+                            </s-button>
+                        )}
+                        {canResume && (
+                            <s-button
+                                variant="primary"
+                                loading={statusAction === "resume"}
+                                disabled={actionsBusy}
+                                onClick={() => handleStatusAction("resume")}
+                            >
+                                Resume subscription
+                            </s-button>
+                        )}
+                        {canCancel && (
+                            <s-button
+                                tone="critical"
+                                disabled={actionsBusy}
+                                onClick={() => openCancelModal(subscription)}
+                            >
+                                Cancel subscription
+                            </s-button>
+                        )}
+                        {canEdit && (
+                            <s-button
+                                variant={canResume ? "secondary" : "primary"}
+                                disabled={actionsBusy}
+                                onClick={() => goToSubscriptionEdit(navigate, id)}
+                            >
+                                Edit subscription
+                            </s-button>
+                        )}
                     </div>
                 </div>
 
@@ -437,45 +654,157 @@ export default function SubscriptionShow() {
                                 <h3 className="subscription-card__title">Items</h3>
                             </div>
                             <div className="subscription-card__body">
-                                {subscription.products.map((product) => (
-                                    <div key={product.id} className="subscription-item-row">
-                                        {product.image_url ? (
-                                            <img
-                                                className="subscription-item-row__image"
-                                                src={product.image_url}
-                                                alt={product.title}
-                                            />
-                                        ) : (
-                                            <div className="subscription-item-row__placeholder">
-                                                ITEM
-                                            </div>
-                                        )}
+                                {subscription.products.map((product) => {
+                                    const pricing = calculateProductDiscountedTotal(
+                                        product,
+                                        subscription.discounts ?? []
+                                    );
+                                    const currency =
+                                        product.currency_code || subscription.currency_code;
 
-                                        <div>
-                                            <p className="subscription-item-row__title">
-                                                {product.title}
-                                            </p>
-                                            <p className="subscription-item-row__meta">
-                                                {product.variant_title || "Default variant"}
-                                                {product.sku ? ` • SKU: ${product.sku}` : ""}
-                                            </p>
-                                            <p className="subscription-item-row__meta">
-                                                {product.quantity} x{" "}
-                                                {formatMoney(
-                                                    product.current_price,
-                                                    product.currency_code
-                                                )}
-                                            </p>
-                                        </div>
-
-                                        <div className="subscription-item-row__price">
-                                            {formatMoney(
-                                                product.current_price * product.quantity,
-                                                product.currency_code
+                                    return (
+                                        <div key={product.id} className="subscription-item-row">
+                                            {product.image_url ? (
+                                                <img
+                                                    className="subscription-item-row__image"
+                                                    src={product.image_url}
+                                                    alt={product.title}
+                                                />
+                                            ) : (
+                                                <div className="subscription-item-row__placeholder">
+                                                    ITEM
+                                                </div>
                                             )}
+
+                                            <div>
+                                                <p className="subscription-item-row__title">
+                                                    {product.title}
+                                                </p>
+                                                <p className="subscription-item-row__meta">
+                                                    {product.variant_title || "Default variant"}
+                                                    {product.sku ? ` • SKU: ${product.sku}` : ""}
+                                                </p>
+                                                <p className="subscription-item-row__meta">
+                                                    {product.quantity} x{" "}
+                                                    {pricing.has_discount ? (
+                                                        <>
+                                                            <span className="subscription-price--original">
+                                                                {formatMoney(
+                                                                    pricing.unit_price,
+                                                                    currency
+                                                                )}
+                                                            </span>{" "}
+                                                            <span className="subscription-price--discounted">
+                                                                {formatMoney(
+                                                                    pricing.discounted_unit_price,
+                                                                    currency
+                                                                )}
+                                                            </span>
+                                                        </>
+                                                    ) : (
+                                                        formatMoney(pricing.unit_price, currency)
+                                                    )}
+                                                </p>
+                                                {pricing.applicable_discounts.length > 0 && (
+                                                    <div className="subscription-item-discounts">
+                                                        {pricing.applicable_discounts.map(
+                                                            (discount) => (
+                                                                <s-badge
+                                                                    key={discount.id}
+                                                                    tone="success"
+                                                                >
+                                                                    {discount.title}:{" "}
+                                                                    {formatDiscountLabel(
+                                                                        discount,
+                                                                        currency
+                                                                    )}
+                                                                </s-badge>
+                                                            )
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="subscription-item-row__price">
+                                                {pricing.has_discount ? (
+                                                    <>
+                                                        <span className="subscription-price--original">
+                                                            {formatMoney(
+                                                                pricing.original_total,
+                                                                currency
+                                                            )}
+                                                        </span>
+                                                        <span className="subscription-price--discounted">
+                                                            {formatMoney(
+                                                                pricing.discounted_total,
+                                                                currency
+                                                            )}
+                                                        </span>
+                                                    </>
+                                                ) : (
+                                                    formatMoney(pricing.original_total, currency)
+                                                )}
+                                            </div>
                                         </div>
+                                    );
+                                })}
+
+                                <div className="subscription-items-discounts">
+                                    <div className="subscription-items-discounts__header">
+                                        <h4 className="subscription-items-discounts__title">
+                                            Applied discounts
+                                        </h4>
                                     </div>
-                                ))}
+
+                                    {(subscription.discounts ?? []).length > 0 ? (
+                                        <div className="subscription-discount-list">
+                                            {subscription.discounts.map((discount) => (
+                                                <div
+                                                    key={discount.id}
+                                                    className="subscription-discount-item subscription-discount-item--row"
+                                                >
+                                                    <div>
+                                                        <p className="subscription-discount-item__title">
+                                                            {discount.title}
+                                                        </p>
+                                                        <p className="subscription-discount-item__meta">
+                                                            {formatDiscountLabel(
+                                                                discount,
+                                                                subscription.currency_code
+                                                            )}
+                                                            {discount.recurring_cycle_limit
+                                                                ? ` • ${discount.recurring_cycle_limit} cycle(s)`
+                                                                : " • Unlimited cycles"}
+                                                            {discount.applies_to_all
+                                                                ? " • All items"
+                                                                : discount.lines?.length
+                                                                  ? ` • ${discount.lines
+                                                                        .map((line) => line.title)
+                                                                        .filter(Boolean)
+                                                                        .join(", ")}`
+                                                                  : " • Selected items"}
+                                                        </p>
+                                                    </div>
+
+                                                    <s-button
+                                                        tone="critical"
+                                                        disabled={Boolean(deletingDiscountId)}
+                                                        loading={deletingDiscountId === discount.id}
+                                                        onClick={() =>
+                                                            handleDeleteDiscount(discount.id)
+                                                        }
+                                                    >
+                                                        Delete
+                                                    </s-button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <p className="subscription-address-line">
+                                            No discounts applied to these items.
+                                        </p>
+                                    )}
+                                </div>
                             </div>
                         </div>
 
@@ -506,6 +835,8 @@ export default function SubscriptionShow() {
                             error={billingError}
                             hasNextPage={pageInfo.has_next_page}
                             firstUnbilledIndex={firstUnbilledIndex}
+                            actionsDisabled={billingActionsDisabled}
+                            isPrepaid={isPrepaid}
                             onLoadMore={loadMore}
                             onCharge={chargeCycle}
                             onSkip={skipCycle}
@@ -543,59 +874,43 @@ export default function SubscriptionShow() {
                     </s-stack>
 
                     <div className="subscription-side-stack">
-                        <div className="subscription-card">
-                            <div className="subscription-card__header">
-                                <h3 className="subscription-card__title">Customer</h3>
-                            </div>
-                            <div className="subscription-card__body">
-                                <p className="subscription-item-row__title">
-                                    {formatCustomerName(subscription.customer)}
-                                </p>
-                                <p className="subscription-item-row__meta">
-                                    {subscription.customer?.email || "No email"}
-                                </p>
-                                {subscription.customer?.phone && (
-                                    <p className="subscription-item-row__meta">
-                                        {subscription.customer.phone}
-                                    </p>
-                                )}
-                            </div>
-                        </div>
+                        <CustomerCard
+                            customer={subscription.customer}
+                            subscriptionId={id}
+                            onSynced={setCustomer}
+                        />
+
+                        <ShippingAddressCard
+                            shipping={subscription.shipping}
+                            customerAdminUrl={
+                                subscription.customer?.admin_url ||
+                                subscription.shipping?.customer_admin_url ||
+                                subscription.payment_method?.customer_admin_url
+                            }
+                            onSelectDifferent={openSelectAddressModal}
+                            onManageCustomer={handleManageCustomerAddresses}
+                            onEditManually={openEditAddressModal}
+                        />
+
+                        <PaymentMethodCard
+                            paymentMethod={subscription.payment_method}
+                            sendingUpdate={sendingPaymentUpdate}
+                            onSendUpdateLink={handleSendPaymentUpdate}
+                            onManageCustomer={handleManageCustomerPayment}
+                            onSwap={openSwapPaymentModal}
+                        />
 
                         <div className="subscription-card">
                             <div className="subscription-card__header">
-                                <h3 className="subscription-card__title">Shipping address</h3>
-                            </div>
-                            <div className="subscription-card__body">
-                                {shippingLines ? (
-                                    shippingLines.map((line) => (
-                                        <p key={line} className="subscription-address-line">
-                                            {line}
-                                        </p>
-                                    ))
-                                ) : (
-                                    <p className="subscription-address-line">
-                                        No shipping address saved.
-                                    </p>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="subscription-card">
-                            <div className="subscription-card__header">
-                                <h3 className="subscription-card__title">Payment method</h3>
+                                <h3 className="subscription-card__title">Discounts</h3>
                             </div>
                             <div className="subscription-card__body">
                                 <p className="subscription-address-line">
-                                    {formatPaymentMethod(subscription.payment_method)}
+                                    {(subscription.discounts ?? []).length > 0
+                                        ? `${subscription.discounts.length} discount(s) applied. Manage them in Items.`
+                                        : "No discounts applied yet."}
                                 </p>
-                                {subscription.payment_method?.expiry_month &&
-                                    subscription.payment_method?.expiry_year && (
-                                        <p className="subscription-item-row__meta">
-                                            Expires {subscription.payment_method.expiry_month}/
-                                            {subscription.payment_method.expiry_year}
-                                        </p>
-                                    )}
+                                <s-button onClick={openDiscountModal}>Add a discount</s-button>
                             </div>
                         </div>
 
@@ -632,6 +947,11 @@ export default function SubscriptionShow() {
                         )}
                     </div>
                 </div>
+                {discountModal}
+                {swapPaymentModal}
+                {selectAddressModal}
+                {editAddressModal}
+                {cancelModal}
             </s-page>
         </div>
     );

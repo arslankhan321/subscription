@@ -23,6 +23,128 @@ class SubscriptionController extends Controller
         ]);
     }
 
+    public function createMeta()
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'data' => $this->service->createMeta(),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function searchCustomers(Request $request)
+    {
+        $validated = $request->validate([
+            'query' => ['required', 'string', 'min:1', 'max:255'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'data' => $this->service->searchCustomers($validated['query']),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function customerPaymentMethodsByCustomer(Request $request)
+    {
+        $validated = $request->validate([
+            'customer_id' => ['required', 'string'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'data' => $this->service->paymentMethodsForCustomer($validated['customer_id']),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function customerAddressesByCustomer(Request $request)
+    {
+        $validated = $request->validate([
+            'customer_id' => ['required', 'string'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'data' => $this->service->addressesForCustomer($validated['customer_id']),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function store(Request $request)
+    {
+        $validated = $request->validate([
+            'customer_id' => ['required', 'string'],
+            'payment_method_id' => ['required', 'string'],
+            'currency_code' => ['nullable', 'string', 'size:3'],
+            'next_billing_date' => ['required', 'date'],
+            'status' => ['nullable', 'string', 'in:ACTIVE,PAUSED,active,paused'],
+            'billing_type' => ['required', 'string', 'in:Pay as you go,Prepaid'],
+            'delivery_frequency' => ['required', 'integer', 'min:1'],
+            'delivery_interval' => ['required', 'string', 'in:days,weeks,months,years,DAY,WEEK,MONTH,YEAR'],
+            'billing_frequency' => ['nullable', 'integer', 'min:1'],
+            'billing_interval' => ['nullable', 'string', 'in:days,weeks,months,years,DAY,WEEK,MONTH,YEAR'],
+            'billing_min_cycles' => ['nullable', 'integer', 'min:1'],
+            'billing_max_cycles' => ['nullable', 'integer', 'min:1'],
+            'delivery_price' => ['nullable', 'numeric', 'min:0'],
+            'delivery_method_title' => ['nullable', 'string', 'max:255'],
+            'digital_product' => ['sometimes', 'boolean'],
+            'shipping' => ['nullable', 'array'],
+            'shipping.first_name' => ['nullable', 'string', 'max:255'],
+            'shipping.last_name' => ['nullable', 'string', 'max:255'],
+            'shipping.company' => ['nullable', 'string', 'max:255'],
+            'shipping.address1' => ['nullable', 'string', 'max:255'],
+            'shipping.address2' => ['nullable', 'string', 'max:255'],
+            'shipping.city' => ['nullable', 'string', 'max:255'],
+            'shipping.province' => ['nullable', 'string', 'max:255'],
+            'shipping.province_code' => ['nullable', 'string', 'max:32'],
+            'shipping.country' => ['nullable', 'string', 'max:255'],
+            'shipping.country_code' => ['nullable', 'string', 'size:2'],
+            'shipping.zip' => ['nullable', 'string', 'max:64'],
+            'shipping.phone' => ['nullable', 'string', 'max:64'],
+            'lines' => ['required', 'array', 'min:1'],
+            'lines.*.product_variant_id' => ['required', 'string'],
+            'lines.*.quantity' => ['required', 'integer', 'min:1'],
+            'lines.*.current_price' => ['required', 'numeric', 'min:0'],
+            'lines.*.selling_plan_id' => ['nullable', 'string'],
+            'lines.*.selling_plan_name' => ['nullable', 'string'],
+        ]);
+
+        $isDigital = (bool) ($validated['digital_product'] ?? false);
+
+        if (! $isDigital) {
+            $request->validate([
+                'shipping.address1' => ['required', 'string', 'max:255'],
+                'shipping.city' => ['required', 'string', 'max:255'],
+                'shipping.country_code' => ['required', 'string', 'size:2'],
+                'shipping.zip' => ['required', 'string', 'max:64'],
+                'shipping.last_name' => ['required', 'string', 'max:255'],
+            ]);
+        }
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Subscription created.',
+                'data' => $this->service->create($validated),
+            ], 201);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
     public function show(int $id)
     {
         try {
@@ -105,6 +227,225 @@ class SubscriptionController extends Controller
                 'success' => true,
                 'message' => 'Billing cycle rescheduled.',
                 'data' => $this->service->rescheduleCycle($id, $cycleIndex, $billingDate),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function addDiscount(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'type' => ['required', 'in:percentage,fixed'],
+            'amount' => ['required', 'numeric', 'min:0'],
+            'applies_to_all' => ['sometimes', 'boolean'],
+            'line_id' => ['nullable', 'string'],
+            'limit_cycles' => ['sometimes', 'boolean'],
+            'recurring_cycle_limit' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        if (($validated['type'] ?? '') === 'percentage' && (float) $validated['amount'] > 100) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Percentage discount cannot exceed 100.',
+            ], 422);
+        }
+
+        if (! ($validated['applies_to_all'] ?? true) && empty($validated['line_id'])) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Select a line item for the discount.',
+            ], 422);
+        }
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Discount applied.',
+                'data' => $this->service->addDiscount($id, $validated),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function removeDiscount(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'discount_id' => ['required', 'string'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Discount removed.',
+                'data' => $this->service->removeDiscount($id, $validated['discount_id']),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function paymentMethods(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'data' => $this->service->customerPaymentMethods($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function sendPaymentMethodUpdate(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Update card link emailed to the customer.',
+                'data' => $this->service->sendPaymentMethodUpdateEmail($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function swapPaymentMethod(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'payment_method_id' => ['required', 'string'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Payment method updated.',
+                'data' => $this->service->swapPaymentMethod($id, $validated['payment_method_id']),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function customerAddresses(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'data' => $this->service->customerAddresses($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function updateShippingAddress(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'first_name' => ['nullable', 'string', 'max:255'],
+            'last_name' => ['required', 'string', 'max:255'],
+            'company' => ['nullable', 'string', 'max:255'],
+            'address1' => ['required', 'string', 'max:255'],
+            'address2' => ['nullable', 'string', 'max:255'],
+            'city' => ['required', 'string', 'max:255'],
+            'province' => ['nullable', 'string', 'max:255'],
+            'province_code' => ['nullable', 'string', 'max:32'],
+            'country' => ['nullable', 'string', 'max:255'],
+            'country_code' => ['required', 'string', 'size:2'],
+            'zip' => ['required', 'string', 'max:64'],
+            'phone' => ['nullable', 'string', 'max:64'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Shipping address updated.',
+                'data' => $this->service->updateShippingAddress($id, $validated),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function syncCustomer(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Customer info synced.',
+                'data' => $this->service->syncCustomer($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function pause(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Subscription paused.',
+                'data' => $this->service->pause($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function resume(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Subscription resumed.',
+                'data' => $this->service->resume($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function cancel(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Subscription cancelled.',
+                'data' => $this->service->cancel($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function update(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'billing_type' => ['required', 'string', 'in:Pay as you go,Prepaid'],
+            'delivery_frequency' => ['required', 'integer', 'min:1'],
+            'delivery_interval' => ['required', 'string', 'in:days,weeks,months,years,DAY,WEEK,MONTH,YEAR'],
+            'billing_frequency' => ['nullable', 'integer', 'min:1'],
+            'billing_interval' => ['nullable', 'string', 'in:days,weeks,months,years,DAY,WEEK,MONTH,YEAR'],
+            'delivery_price' => ['nullable', 'numeric', 'min:0'],
+            'lines' => ['required', 'array', 'min:1'],
+            'lines.*.id' => ['nullable', 'string'],
+            'lines.*.add' => ['sometimes', 'boolean'],
+            'lines.*.product_variant_id' => ['nullable', 'string'],
+            'lines.*.selling_plan_id' => ['nullable', 'string'],
+            'lines.*.selling_plan_name' => ['nullable', 'string'],
+            'lines.*.quantity' => ['nullable', 'integer', 'min:1'],
+            'lines.*.current_price' => ['nullable', 'numeric', 'min:0'],
+            'lines.*.remove' => ['sometimes', 'boolean'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Subscription updated.',
+                'data' => $this->service->update($id, $validated),
             ]);
         } catch (ShopifySellingPlanException $exception) {
             return $this->shopifyErrorResponse($exception);

@@ -12,7 +12,7 @@ use Osiset\ShopifyApp\Objects\Values\ShopDomain;
 use stdClass;
 use Throwable;
 
-class WebhookSubscriptionUpdateJob implements ShouldQueue
+class WebhookSubscriptionCancelJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
@@ -55,7 +55,7 @@ class WebhookSubscriptionUpdateJob implements ShouldQueue
         $shop = User::query()->where('name', $shopDomain)->first();
 
         if ($shop === null) {
-            Log::warning('Subscription contract update webhook received for unknown shop', [
+            Log::warning('Subscription contract cancel webhook received for unknown shop', [
                 'shop_domain' => $shopDomain,
             ]);
 
@@ -65,7 +65,7 @@ class WebhookSubscriptionUpdateJob implements ShouldQueue
         try {
             $syncService->syncFromWebhook($shop, $this->data);
         } catch (Throwable $exception) {
-            Log::error('Failed to sync subscription contract update', [
+            Log::error('Failed to sync subscription contract cancel', [
                 'shop_id' => $shop->id,
                 'shop_domain' => $shopDomain,
                 'contract_id' => $this->data->id ?? null,

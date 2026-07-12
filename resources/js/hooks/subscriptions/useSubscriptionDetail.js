@@ -7,13 +7,17 @@ export function useSubscriptionDetail(id) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
-    const fetchSubscription = useCallback(async () => {
+    const fetchSubscription = useCallback(async (options = {}) => {
         if (!id) {
             return;
         }
 
+        const silent = Boolean(options.silent);
+
         try {
-            setLoading(true);
+            if (!silent) {
+                setLoading(true);
+            }
             setError(null);
 
             const response = await getSubscription(id);
@@ -24,7 +28,9 @@ export function useSubscriptionDetail(id) {
             setError(message);
             showToast(message, { isError: true });
         } finally {
-            setLoading(false);
+            if (!silent) {
+                setLoading(false);
+            }
         }
     }, [id]);
 
@@ -32,10 +38,35 @@ export function useSubscriptionDetail(id) {
         fetchSubscription();
     }, [fetchSubscription]);
 
+    const setDiscounts = useCallback((discounts) => {
+        setSubscription((prev) => (prev ? { ...prev, discounts } : prev));
+    }, []);
+
+    const setPaymentMethod = useCallback((paymentMethod) => {
+        setSubscription((prev) => (prev ? { ...prev, payment_method: paymentMethod } : prev));
+    }, []);
+
+    const setShipping = useCallback((shipping) => {
+        setSubscription((prev) => (prev ? { ...prev, shipping } : prev));
+    }, []);
+
+    const setCustomer = useCallback((customer) => {
+        setSubscription((prev) => (prev ? { ...prev, customer } : prev));
+    }, []);
+
+    const setSubscriptionData = useCallback((data) => {
+        setSubscription(data);
+    }, []);
+
     return {
         subscription,
         loading,
         error,
         refetch: fetchSubscription,
+        setSubscriptionData,
+        setDiscounts,
+        setPaymentMethod,
+        setShipping,
+        setCustomer,
     };
 }

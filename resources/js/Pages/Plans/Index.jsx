@@ -1,6 +1,7 @@
 import { useMemo, useState, useCallback } from "react";
 import PlanForm from "./PlanForm";
 import RecurringInvoicePlanForm from "./RecurringInvoicePlanForm";
+import { PlansIndexSkeleton } from "@/Components/Skeletons";
 import PlanStatCard from "@/Components/Plans/PlanStatCard";
 import PlanEmptyState from "@/Components/Plans/PlanEmptyState";
 import { useDeletePlanModal } from "@/Components/Plans/DeletePlanModal";
@@ -9,6 +10,7 @@ import { usePlans } from "@/hooks/plans/usePlans";
 import { PLAN_TYPES } from "@/constants/planConstants";
 import { formatPlanStatus, getPlanTypeLabel, getStatusTone } from "@/utils/planHelpers";
 import "@/styles/plans.css";
+import "@/styles/skeleton.css";
 
 export default function PlansListing() {
     const [view, setView] = useState({ mode: "listing", planId: null, planType: null });
@@ -91,6 +93,9 @@ export default function PlansListing() {
                     Create Plan
                 </s-button>
 
+                {loading ? (
+                    <PlansIndexSkeleton />
+                ) : (
                 <s-stack direction="block" gap="base">
                     <div className="plans-hero">
                         <h2 className="plans-hero__title">Manage subscription plans</h2>
@@ -130,7 +135,7 @@ export default function PlansListing() {
                             </s-select>
                         </div>
 
-                        <s-table loading={loading}>
+                        <s-table>
                             <s-table-header-row>
                                 <s-table-header listSlot="primary">Plan Name</s-table-header>
                                 <s-table-header listSlot="inline">Type</s-table-header>
@@ -142,7 +147,7 @@ export default function PlansListing() {
                             </s-table-header-row>
 
                             <s-table-body>
-                                {!loading && filteredPlans.length === 0 && (
+                                {filteredPlans.length === 0 && (
                                     <s-table-row>
                                         <s-table-cell colSpan="7">
                                             <PlanEmptyState onCreate={openPlanTypeModal} />
@@ -220,6 +225,7 @@ export default function PlansListing() {
                         </s-table>
                     </div>
                 </s-stack>
+                )}
 
                 {deleteModal}
                 {planTypeModal}

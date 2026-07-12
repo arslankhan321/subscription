@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ModalListSkeleton } from "@/Components/Skeletons";
 import { getPlans } from "@/Services/planService";
 import { getApiErrorMessage, showToast } from "@/utils/shopifyToast";
+import "@/styles/skeleton.css";
 
 const MODAL_ID = "assign-shipping-plans-modal";
 
@@ -139,7 +141,7 @@ export function useAssignShippingPlansModal({ onSave }) {
 
                 <div className="shipping-assign-modal__list">
                     {loadingPlans ? (
-                        <s-text tone="subdued">Loading plans...</s-text>
+                        <ModalListSkeleton rows={4} />
                     ) : filteredPlans.length === 0 ? (
                         <s-text tone="subdued">No plans found.</s-text>
                     ) : (

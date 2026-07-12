@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import PlanSaveBar from "@/Components/Plans/PlanSaveBar";
+import { SettingsSkeleton } from "@/Components/Skeletons";
 import EmailTemplateEditor from "@/Components/Settings/EmailTemplateEditor";
 import EmailTemplateList from "@/Components/Settings/EmailTemplateList";
 import {
@@ -10,6 +11,7 @@ import { useShopifySaveBar } from "@/hooks/useShopifySaveBar";
 import { toggleEmailTemplate } from "@/Services/emailTemplateService";
 import { getApiErrorMessage, showToast } from "@/utils/shopifyToast";
 import "@/styles/email-settings.css";
+import "@/styles/skeleton.css";
 
 const EMAIL_TEMPLATE_SAVE_BAR_ID = "email-template-save-bar";
 
@@ -85,7 +87,7 @@ export default function EmailSettingsForm() {
 
     if (activeKey) {
         if (editorLoading || !template) {
-            return <s-text tone="subdued">Loading template...</s-text>;
+            return <SettingsSkeleton />;
         }
 
         return (

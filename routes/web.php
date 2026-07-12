@@ -37,7 +37,13 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
     Route::view('/widgets', 'welcome')->name('widgets');
     Route::view('/settings', 'welcome')->name('settings');
     Route::view('/subscriptions', 'welcome')->name('subscriptions');
-    Route::view('/subscriptions/{id}', 'welcome')->name('subscriptions.show');
+    Route::view('/subscriptions/create', 'welcome')->name('subscriptions.create');
+    Route::view('/subscriptions/{id}/edit', 'welcome')
+        ->whereNumber('id')
+        ->name('subscriptions.edit');
+    Route::view('/subscriptions/{id}', 'welcome')
+        ->whereNumber('id')
+        ->name('subscriptions.show');
     Route::view('/bundles', 'welcome')->name('bundles');
     Route::view('/analytics', 'welcome')->name('analytics');
 
@@ -86,8 +92,22 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
 
         Route::get('subscriptions', [SubscriptionController::class, 'index'])
             ->name('selling.subscriptions.index');
+        Route::get('subscriptions/create-meta', [SubscriptionController::class, 'createMeta'])
+            ->name('selling.subscriptions.create-meta');
+        Route::post('subscriptions', [SubscriptionController::class, 'store'])
+            ->name('selling.subscriptions.store');
+        Route::get('subscriptions/customers/search', [SubscriptionController::class, 'searchCustomers'])
+            ->name('selling.subscriptions.customers.search');
+        Route::get('subscriptions/customers/payment-methods', [SubscriptionController::class, 'customerPaymentMethodsByCustomer'])
+            ->name('selling.subscriptions.customers.payment-methods');
+        Route::get('subscriptions/customers/addresses', [SubscriptionController::class, 'customerAddressesByCustomer'])
+            ->name('selling.subscriptions.customers.addresses');
         Route::get('subscriptions/{id}', [SubscriptionController::class, 'show'])
             ->name('selling.subscriptions.show');
+        Route::put('subscriptions/{id}', [SubscriptionController::class, 'update'])
+            ->name('selling.subscriptions.update');
+        Route::post('subscriptions/{id}', [SubscriptionController::class, 'update'])
+            ->name('selling.subscriptions.update.post');
         Route::get('subscriptions/{id}/cycles', [SubscriptionController::class, 'billingCycles'])
             ->name('selling.subscriptions.cycles');
         Route::post('subscriptions/{id}/cycles/{cycleIndex}/charge', [SubscriptionController::class, 'chargeCycle'])
@@ -98,6 +118,28 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
             ->name('selling.subscriptions.cycles.unskip');
         Route::post('subscriptions/{id}/cycles/{cycleIndex}/reschedule', [SubscriptionController::class, 'rescheduleCycle'])
             ->name('selling.subscriptions.cycles.reschedule');
+        Route::post('subscriptions/{id}/discounts', [SubscriptionController::class, 'addDiscount'])
+            ->name('selling.subscriptions.discounts.store');
+        Route::post('subscriptions/{id}/discounts/remove', [SubscriptionController::class, 'removeDiscount'])
+            ->name('selling.subscriptions.discounts.remove');
+        Route::get('subscriptions/{id}/payment-methods', [SubscriptionController::class, 'paymentMethods'])
+            ->name('selling.subscriptions.payment-methods');
+        Route::post('subscriptions/{id}/payment-methods/send-update', [SubscriptionController::class, 'sendPaymentMethodUpdate'])
+            ->name('selling.subscriptions.payment-methods.send-update');
+        Route::post('subscriptions/{id}/payment-methods/swap', [SubscriptionController::class, 'swapPaymentMethod'])
+            ->name('selling.subscriptions.payment-methods.swap');
+        Route::get('subscriptions/{id}/addresses', [SubscriptionController::class, 'customerAddresses'])
+            ->name('selling.subscriptions.addresses');
+        Route::post('subscriptions/{id}/shipping-address', [SubscriptionController::class, 'updateShippingAddress'])
+            ->name('selling.subscriptions.shipping-address.update');
+        Route::post('subscriptions/{id}/customer/sync', [SubscriptionController::class, 'syncCustomer'])
+            ->name('selling.subscriptions.customer.sync');
+        Route::post('subscriptions/{id}/pause', [SubscriptionController::class, 'pause'])
+            ->name('selling.subscriptions.pause');
+        Route::post('subscriptions/{id}/resume', [SubscriptionController::class, 'resume'])
+            ->name('selling.subscriptions.resume');
+        Route::post('subscriptions/{id}/cancel', [SubscriptionController::class, 'cancel'])
+            ->name('selling.subscriptions.cancel');
     });
 });
 

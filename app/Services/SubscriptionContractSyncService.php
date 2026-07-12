@@ -66,6 +66,35 @@ class SubscriptionContractSyncService
             return $this->syncFromWebhookPayloadOnly($shop, $payload);
         }
 
+        return $this->persistContract($shop, $contract, $payload);
+    }
+
+    public function syncFromContractGid(User $shop, string $contractGid): ?Subscription
+    {
+        $contract = $this->shopifySubscriptionContractService->fetchContract($shop, $contractGid);
+
+        if ($contract === null) {
+            Log::warning('Subscription contract not found in Shopify during manual sync', [
+                'shop_id' => $shop->id,
+                'contract_gid' => $contractGid,
+            ]);
+
+            return null;
+        }
+
+        $payload = (object) [
+            'id' => $this->gidToId($contract['id'] ?? null),
+            'admin_graphql_api_id' => $contract['id'] ?? null,
+            'revision_id' => $contract['revisionId'] ?? 0,
+            'status' => $contract['status'] ?? 'active',
+            'currency_code' => $contract['currencyCode'] ?? 'USD',
+        ];
+
+        return $this->persistContract($shop, $contract, $payload);
+    }
+
+    private function persistContract(User $shop, array $contract, stdClass $payload): Subscription
+    {
         return DB::transaction(function () use ($shop, $payload, $contract) {
             $customer = $this->syncCustomer($shop, $contract, $payload);
             $subscription = $this->syncSubscription($shop, $customer, $contract, $payload);
@@ -229,7 +258,7 @@ class SubscriptionContractSyncService
                 [
                     'shopify_product_id' => $this->gidToId($line['productId'] ?? null),
                     'shopify_variant_id' => $this->gidToId($line['variantId'] ?? null),
-                    'shopify_selling_plan_id' => $line['sellingPlanId'] ?? null,
+                    'shopify_selling_plan_id' => $this->gidToId($line['sellingPlanId'] ?? null),
                     'selling_plan_name' => $line['sellingPlanName'] ?? null,
                     'title' => (string) ($line['title'] ?? 'Subscription item'),
                     'variant_title' => $line['variantTitle'] ?? null,

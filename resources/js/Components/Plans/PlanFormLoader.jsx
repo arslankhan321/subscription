@@ -1,8 +1,8 @@
 export default function PlanFormLoader({ message = "Loading plan..." }) {
     return (
-        <div className="plan-form-loader">
-            <span className="plan-form-loader__spinner" aria-hidden="true" />
-            <p className="plan-form-loader__text">{message}</p>
+        <div className="page-loader" role="status" aria-live="polite" aria-label={message}>
+            <span className="page-loader__spinner page-loader__spinner--lg" aria-hidden="true" />
+            <p className="page-loader__text">{message}</p>
         </div>
     );
 }
