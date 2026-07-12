@@ -415,6 +415,10 @@ return [
     */
 
     'webhooks' => [
+        [
+            'topic' => 'SUBSCRIPTION_CONTRACTS_CREATE',
+            'address' => 'https://excavate-showpiece-grape.ngrok-free.dev/webhook/contract-create'
+        ]
         /*
             [
                 'topic' => env('SHOPIFY_WEBHOOK_1_TOPIC', 'ORDERS_CREATE'),

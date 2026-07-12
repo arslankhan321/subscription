@@ -24,6 +24,17 @@ const SideBarMenu = () => {
             >
                 Plans
             </a>
+
+            <a
+                href="/subscriptions"
+                onClick={(e) => {
+                    e.preventDefault();
+                    navigate(`/subscriptions?shop=${shopDomain}&host=${app_host}`);
+                }}
+            >
+                Subscriptions
+            </a>
+
             <a
                 href="/widgets"
                 onClick={(e) => {

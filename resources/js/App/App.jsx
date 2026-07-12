@@ -4,6 +4,8 @@ import SideBarMenu from "../Components/SideBarMenu/SideBarMenu.jsx";
 
 const Dashboard = React.lazy(() => import("../Pages/Dashboard/Dashboard.jsx"));
 const Plans = React.lazy(() => import("../Pages/Plans/Index.jsx"));
+const Subscriptions = React.lazy(() => import("../Pages/Subscriptions/Index.jsx"));
+const SubscriptionShow = React.lazy(() => import("../Pages/Subscriptions/Show.jsx"));
 const Widgets = React.lazy(() => import("../Pages/Widgets/Index.jsx"));
 const Settings = React.lazy(() => import("../Pages/Settings/Index.jsx"));
 
@@ -54,6 +56,8 @@ function AppRoutes() {
             <Routes>
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/plans" element={<Plans />} />
+                <Route path="/subscriptions" element={<Subscriptions />} />
+                <Route path="/subscriptions/:id" element={<SubscriptionShow />} />
                 <Route path="/widgets" element={<Widgets />} />
                 <Route path="/settings" element={<Settings />} />
             </Routes>

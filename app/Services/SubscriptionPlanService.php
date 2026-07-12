@@ -51,7 +51,7 @@ class SubscriptionPlanService
     public function create(array $data)
     {
         $shop = $this->shopifyGraphqlService->shop();
-        $shouldRegisterWebhooks = $this->shopHasPlans($shop->id);
+        $shouldRegisterWebhooks = !$this->shopHasPlans($shop->id);
 
         $plan = DB::transaction(function () use ($data) {
             $plan = $this->repository->create($this->planAttributes($data));

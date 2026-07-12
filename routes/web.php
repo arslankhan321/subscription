@@ -6,6 +6,7 @@ use App\Http\Controllers\SubscriptionWidgetController;
 use App\Http\Controllers\EmailTemplateController;
 use App\Http\Controllers\ShopSettingsController;
 use App\Http\Controllers\ShippingProfileController;
+use App\Http\Controllers\SubscriptionController;
 
 Route::get('/', function () {
     return view('welcome');
@@ -36,6 +37,7 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
     Route::view('/widgets', 'welcome')->name('widgets');
     Route::view('/settings', 'welcome')->name('settings');
     Route::view('/subscriptions', 'welcome')->name('subscriptions');
+    Route::view('/subscriptions/{id}', 'welcome')->name('subscriptions.show');
     Route::view('/bundles', 'welcome')->name('bundles');
     Route::view('/analytics', 'welcome')->name('analytics');
 
@@ -81,6 +83,21 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
             ->name('selling.email-templates.reset');
         Route::post('email-templates/{key}/send-test', [EmailTemplateController::class, 'sendTest'])
             ->name('selling.email-templates.send-test');
+
+        Route::get('subscriptions', [SubscriptionController::class, 'index'])
+            ->name('selling.subscriptions.index');
+        Route::get('subscriptions/{id}', [SubscriptionController::class, 'show'])
+            ->name('selling.subscriptions.show');
+        Route::get('subscriptions/{id}/cycles', [SubscriptionController::class, 'billingCycles'])
+            ->name('selling.subscriptions.cycles');
+        Route::post('subscriptions/{id}/cycles/{cycleIndex}/charge', [SubscriptionController::class, 'chargeCycle'])
+            ->name('selling.subscriptions.cycles.charge');
+        Route::post('subscriptions/{id}/cycles/{cycleIndex}/skip', [SubscriptionController::class, 'skipCycle'])
+            ->name('selling.subscriptions.cycles.skip');
+        Route::post('subscriptions/{id}/cycles/{cycleIndex}/unskip', [SubscriptionController::class, 'unskipCycle'])
+            ->name('selling.subscriptions.cycles.unskip');
+        Route::post('subscriptions/{id}/cycles/{cycleIndex}/reschedule', [SubscriptionController::class, 'rescheduleCycle'])
+            ->name('selling.subscriptions.cycles.reschedule');
     });
 });
 

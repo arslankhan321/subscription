@@ -23,6 +23,26 @@ class ShopifyGraphqlService
         return $shop;
     }
 
+    public function executeForShop(User $shop, string $query, array $variables = []): array
+    {
+        $response = $shop->api()->graph($query, $variables);
+
+        if ($response['errors'] !== false) {
+            $message = $this->extractErrorMessage($response);
+
+            Log::error('Shopify GraphQL request failed', [
+                'shop_id' => $shop->id,
+                'message' => $message,
+                'status' => $response['status'] ?? null,
+                'variables' => $variables,
+            ]);
+
+            throw new ShopifySellingPlanException($message);
+        }
+
+        return $this->normalizeData($response['body']['data'] ?? []);
+    }
+
     public function execute(string $query, array $variables = []): array
     {
         $response = $this->shop()->api()->graph($query, $variables);
@@ -61,7 +81,12 @@ class ShopifyGraphqlService
 
     public function mutation(string $mutationName, string $query, array $variables): array
     {
-        $data = $this->execute($query, $variables);
+        return $this->mutationForShop($this->shop(), $mutationName, $query, $variables);
+    }
+
+    public function mutationForShop(User $shop, string $mutationName, string $query, array $variables): array
+    {
+        $data = $this->executeForShop($shop, $query, $variables);
         $result = $data[$mutationName] ?? null;
 
         if (!$result) {
