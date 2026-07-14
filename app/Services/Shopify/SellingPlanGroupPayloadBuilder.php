@@ -15,6 +15,7 @@ class SellingPlanGroupPayloadBuilder
         return array_filter([
             'name' => $data['name'] ?? $plan->name,
             'merchantCode' => $merchantCode,
+            'appId' => $this->appId(),
             'options' => ['Delivery every'],
             'position' => 1,
             'sellingPlansToCreate' => $this->buildSellingPlans($options),
@@ -26,9 +27,15 @@ class SellingPlanGroupPayloadBuilder
         return array_filter([
             'name' => $data['name'] ?? $plan->name,
             'merchantCode' => $plan->merchant_code ?: $this->merchantCode($plan),
+            'appId' => $this->appId(),
             'options' => ['Delivery every'],
             'sellingPlansToCreate' => $this->buildSellingPlans($data['deliveryOptions'] ?? []),
         ], fn ($value) => $value !== null);
+    }
+
+    public function appId(): string
+    {
+        return (string) config('shopify-app.selling_plan_app_id', 'subscribify');
     }
 
     public function buildResources(array $products): array

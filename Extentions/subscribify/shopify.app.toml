@@ -1,0 +1,28 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "a6444af8f1f7bd85047bfcdf2ddb0a16"
+name = "Subscribify"
+application_url = "https://sleeping-nursery-simon-timer.trycloudflare.com"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2026-04"
+
+[access_scopes]
+# Keep in sync with config/shopify-app.php / SHOPIFY_API_SCOPES
+scopes = "read_products,write_products,read_themes,read_locations,read_shipping,write_shipping,read_own_subscription_contracts,write_own_subscription_contracts,write_purchase_options,read_customer_payment_methods,read_customers,write_customers"
+optional_scopes = [ ]
+use_legacy_install_flow = true
+
+[auth]
+redirect_urls = [
+  "https://sleeping-nursery-simon-timer.trycloudflare.com/authenticate"
+]
+
+[app_proxy]
+url = "https://sleeping-nursery-simon-timer.trycloudflare.com"
+subpath = "subscribify"
+prefix = "apps"

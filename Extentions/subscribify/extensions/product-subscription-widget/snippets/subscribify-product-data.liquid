@@ -1,0 +1,63 @@
+{% comment %}
+  Builds #subscription-widget-data JSON for one product.
+  Prefer Subscribify plans (selling_plan_group.app_id == 'subscribify').
+  If none are stamped yet, include untagged allocations so the widget still works,
+  while skipping groups that belong to other apps (non-blank, non-subscribify app_id).
+  Required: product
+{% endcomment %}
+{%- liquid
+  assign has_subscribify = false
+  for group in product.selling_plan_groups
+    if group.app_id == 'subscribify'
+      assign has_subscribify = true
+      break
+    endif
+  endfor
+-%}
+{
+  "productId": {{ product.id | json }},
+  "selectedVariantId": {{ product.selected_or_first_available_variant.id | json }},
+  "appId": "subscribify",
+  "filterMode": {% if has_subscribify %}"strict"{% else %}"untagged-or-ours"{% endif %},
+  "variants": {
+    {%- for variant in product.variants -%}
+      {%- assign alloc_first = true -%}
+      "{{ variant.id }}": {
+        "price": {{ variant.price | json }},
+        "compareAtPrice": {{ variant.compare_at_price | json }},
+        "allocations": [
+          {%- for allocation in variant.selling_plan_allocations -%}
+            {%- assign group_app_id = allocation.selling_plan_group.app_id -%}
+            {%- assign include_alloc = false -%}
+            {%- if group_app_id == 'subscribify' -%}
+              {%- assign include_alloc = true -%}
+            {%- elsif has_subscribify == false and group_app_id == blank -%}
+              {%- comment -%} Legacy own plans before appId stamp; exclude other apps that set their app_id {%- endcomment -%}
+              {%- assign include_alloc = true -%}
+            {%- endif -%}
+            {%- if include_alloc -%}
+              {%- unless alloc_first -%},{%- endunless -%}
+              {%- assign alloc_first = false -%}
+              {
+                "sellingPlanId": {{ allocation.selling_plan.id | json }},
+                "name": {{ allocation.selling_plan.name | json }},
+                "groupName": {{ allocation.selling_plan_group.name | json }},
+                "appId": {{ group_app_id | json }},
+                "price": {{ allocation.price | json }},
+                "compareAtPrice": {{ allocation.compare_at_price | json }},
+                "options": [
+                  {%- for option in allocation.selling_plan.options -%}
+                    {
+                      "name": {{ option.name | json }},
+                      "value": {{ option.value | json }}
+                    }{%- unless forloop.last -%},{%- endunless -%}
+                  {%- endfor -%}
+                ]
+              }
+            {%- endif -%}
+          {%- endfor -%}
+        ]
+      }{%- unless forloop.last -%},{%- endunless -%}
+    {%- endfor -%}
+  }
+}

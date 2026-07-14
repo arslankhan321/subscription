@@ -150,6 +150,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Selling plan group appId (Liquid / storefront filter)
+    |--------------------------------------------------------------------------
+    |
+    | Written to SellingPlanGroup.appId so the theme widget can show only this
+    | app's plans (product.selling_plan_groups | where: "app_id", ...).
+    |
+    */
+
+    'selling_plan_app_id' => env('SHOPIFY_SELLING_PLAN_APP_ID', 'subscribify'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Shopify API Version
     |--------------------------------------------------------------------------
     |

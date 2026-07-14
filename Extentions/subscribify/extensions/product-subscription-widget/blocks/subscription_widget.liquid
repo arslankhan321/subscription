@@ -1,0 +1,103 @@
+{% comment %}
+  Subscribify — PDP purchase options widget.
+
+  Strategy: block other apps' selling plan groups (non-blank app_id != subscribify).
+  Keep Subscribify groups + any legacy untagged groups.
+{% endcomment %}
+
+{% liquid
+  assign widget_product = block.settings.product
+  if widget_product == blank
+    assign widget_product = product
+  endif
+
+  assign app_base = block.settings.app_url | strip
+  if app_base == blank
+    assign app_base = shop.url | append: '/apps/subscribify'
+  endif
+
+  assign widget_name = block.settings.widget_name | strip
+
+  assign blocked_group_ids = ','
+  assign has_any_group = false
+
+  if widget_product != blank
+    for group in widget_product.selling_plan_groups
+      assign has_any_group = true
+      if group.app_id != blank and group.app_id != 'subscribify'
+        assign blocked_group_ids = blocked_group_ids | append: group.id | append: ','
+      endif
+    endfor
+  endif
+%}
+
+{% if widget_product != blank and has_any_group %}
+  <script type="application/json" id="subscription-widget-data">
+{"productId":{{ widget_product.id | json }},"selectedVariantId":{{ widget_product.selected_or_first_available_variant.id | json }},"appId":"subscribify","variants":{
+{%- for variant in widget_product.variants -%}
+{%- assign alloc_first = true -%}
+"{{ variant.id }}":{"price":{{ variant.price | json }},"compareAtPrice":{{ variant.compare_at_price | json }},"allocations":[
+{%- for allocation in variant.selling_plan_allocations -%}
+{%- assign gid = allocation.selling_plan_group.id | default: allocation.selling_plan_group_id -%}
+{%- assign needle = ',' | append: gid | append: ',' -%}
+{%- assign group_app_id = allocation.selling_plan_group.app_id -%}
+{%- assign include_alloc = true -%}
+{%- if group_app_id != blank and group_app_id != 'subscribify' -%}
+{%- assign include_alloc = false -%}
+{%- endif -%}
+{%- if blocked_group_ids contains needle -%}
+{%- assign include_alloc = false -%}
+{%- endif -%}
+{%- if include_alloc -%}
+{%- unless alloc_first -%},{%- endunless -%}
+{%- assign alloc_first = false -%}
+{"sellingPlanId":{{ allocation.selling_plan.id | json }},"name":{{ allocation.selling_plan.name | json }},"groupName":{{ allocation.selling_plan_group.name | json }},"appId":{{ group_app_id | json }},"groupId":{{ gid | json }},"price":{{ allocation.price | json }},"compareAtPrice":{{ allocation.compare_at_price | json }},"options":[
+{%- for option in allocation.selling_plan.options -%}
+{"name":{{ option.name | json }},"value":{{ option.value | json }}}{%- unless forloop.last -%},{%- endunless -%}
+{%- endfor -%}
+]}
+{%- endif -%}
+{%- endfor -%}
+]}{%- unless forloop.last -%},{%- endunless -%}
+{%- endfor -%}
+}}
+  </script>
+
+  <div
+    id="subscription-widget"
+    data-app-url="{{ app_base | escape }}"
+    data-widget-name="{{ widget_name | escape }}"
+    {{ block.shopify_attributes }}
+  ></div>
+
+  <script src="{{ app_base }}/subscription-widget.js?v=7" defer></script>
+{% endif %}
+
+{% schema %}
+{
+  "name": "Subscribify widget",
+  "target": "section",
+  "templates": ["product"],
+  "settings": [
+    {
+      "type": "product",
+      "id": "product",
+      "label": "Product",
+      "autofill": true
+    },
+    {
+      "type": "text",
+      "id": "app_url",
+      "label": "App / proxy URL",
+      "info": "Default Cloudflare tunnel or leave blank to use Shopify app proxy (/apps/subscribify).",
+      "default": "https://sleeping-nursery-simon-timer.trycloudflare.com"
+    },
+    {
+      "type": "text",
+      "id": "widget_name",
+      "label": "Widget name (optional)",
+      "info": "Leave blank to use the active widget from Subscribify."
+    }
+  ]
+}
+{% endschema %}

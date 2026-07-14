@@ -20,12 +20,23 @@ class SubscriptionPlanService
 
     public function index()
     {
+        try {
+            $this->shopifySellingPlanService->ensureOwnedGroupsHaveAppId($this->shopId());
+        } catch (\Throwable) {
+            // Storefront filter still works for newly stamped / created groups.
+        }
+
         return $this->repository->all($this->shopId());
     }
 
     public function listShopifyGroups(int $first = 50, ?string $after = null): array
     {
         return $this->shopifySellingPlanService->listGroups($first, $after);
+    }
+
+    public function stampSellingPlanAppIds(): int
+    {
+        return $this->shopifySellingPlanService->ensureOwnedGroupsHaveAppId($this->shopId());
     }
 
     public function getShopifyScopeStatus(): array

@@ -233,6 +233,84 @@ class ShopifySellingPlanService
         );
     }
 
+    /**
+     * Stamp Liquid-filterable appId on this app's selling plan groups.
+     * Prefers local DB group IDs, then paginates Admin API owned groups.
+     */
+    public function ensureOwnedGroupsHaveAppId(?int $shopId = null): int
+    {
+        $targetAppId = $this->payloadBuilder->appId();
+        $updated = 0;
+        $seen = [];
+
+        $mutation = <<<'GQL'
+        mutation stampSellingPlanGroupAppId($id: ID!, $input: SellingPlanGroupInput!) {
+            sellingPlanGroupUpdate(id: $id, input: $input) {
+                sellingPlanGroup { id appId }
+                userErrors { field message }
+            }
+        }
+        GQL;
+
+        $stamp = function (string $groupId) use ($mutation, $targetAppId, &$updated, &$seen): void {
+            $gid = $this->payloadBuilder->toSellingPlanGroupGid($groupId);
+            if (isset($seen[$gid])) {
+                return;
+            }
+            $seen[$gid] = true;
+
+            try {
+                $this->graphql->mutation('sellingPlanGroupUpdate', $mutation, [
+                    'id' => $gid,
+                    'input' => ['appId' => $targetAppId],
+                ]);
+                $updated++;
+            } catch (\Throwable) {
+                // Group may already be deleted in Shopify.
+            }
+        };
+
+        $localQuery = \App\Models\SubscriptionPlan::query()
+            ->whereNotNull('shopify_group_id')
+            ->where('shopify_group_id', '!=', '');
+
+        if ($shopId) {
+            $localQuery->where('shop_id', $shopId);
+        }
+
+        foreach ($localQuery->pluck('shopify_group_id') as $groupId) {
+            $stamp((string) $groupId);
+        }
+
+        $after = null;
+        do {
+            $page = $this->listGroups(50, $after);
+            $edges = $page['edges'] ?? [];
+
+            foreach ($edges as $edge) {
+                $node = $edge['node'] ?? null;
+                if (is_object($node) && method_exists($node, 'toArray')) {
+                    $node = $node->toArray();
+                }
+                if (! is_array($node) || empty($node['id'])) {
+                    continue;
+                }
+
+                if (($node['appId'] ?? null) === $targetAppId) {
+                    $seen[$node['id']] = true;
+                    continue;
+                }
+
+                $stamp((string) $node['id']);
+            }
+
+            $pageInfo = $page['pageInfo'] ?? [];
+            $after = ! empty($pageInfo['hasNextPage']) ? ($pageInfo['endCursor'] ?? null) : null;
+        } while ($after);
+
+        return $updated;
+    }
+
     private function mapGroupResponse(array $group): array
     {
         $planIdsByPosition = [];
