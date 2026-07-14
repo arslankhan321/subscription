@@ -15,7 +15,10 @@ function isUnbilledCycle(cycle) {
     return !cycle?.skipped && status !== "BILLED" && !cycle?.billing_attempt?.order_name;
 }
 
-export function useBillingCycles(subscriptionId, { enabled = true, perPage = DEFAULT_PER_PAGE } = {}) {
+export function useBillingCycles(
+    subscriptionId,
+    { enabled = true, perPage = DEFAULT_PER_PAGE, onActionComplete = null } = {}
+) {
     const [cycles, setCycles] = useState([]);
     const [pageInfo, setPageInfo] = useState({
         has_next_page: false,
@@ -120,6 +123,7 @@ export function useBillingCycles(subscriptionId, { enabled = true, perPage = DEF
                 await action();
                 showToast(successMessage);
                 await refetch();
+                onActionComplete?.();
             } catch (err) {
                 console.error(err);
                 showToast(getApiErrorMessage(err, "Action failed"), { isError: true });
@@ -127,7 +131,7 @@ export function useBillingCycles(subscriptionId, { enabled = true, perPage = DEF
                 setActionLoading(null);
             }
         },
-        [subscriptionId, refetch]
+        [subscriptionId, refetch, onActionComplete]
     );
 
     const chargeCycle = useCallback(

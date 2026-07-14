@@ -15,7 +15,8 @@ class SubscriptionService
     public function __construct(
         protected ShopifyGraphqlService $shopifyGraphqlService,
         protected ShopifySubscriptionContractService $shopifySubscriptionContractService,
-        protected SubscriptionContractSyncService $subscriptionContractSyncService
+        protected SubscriptionContractSyncService $subscriptionContractSyncService,
+        protected SubscriptionActivityLogService $activityLogService
     ) {}
 
     public function index(array $filters = []): array
@@ -66,6 +67,7 @@ class SubscriptionService
             'products',
             'shipping',
             'recurringOrders',
+            'activityLogs' => fn ($query) => $query->orderByDesc('created_at')->orderByDesc('id')->limit(50),
         ]);
 
         $payload = $this->transformDetail($subscription);
@@ -164,45 +166,81 @@ class SubscriptionService
     {
         [$shop, $subscription] = $this->shopAndSubscription($id);
 
-        return $this->shopifySubscriptionContractService->chargeCycle(
+        $result = $this->shopifySubscriptionContractService->chargeCycle(
             $shop,
             $subscription->shopify_gid,
             $cycleIndex
         );
+
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_CHARGED,
+            "Merchant charged billing cycle #{$cycleIndex}.",
+            ['cycle_index' => $cycleIndex]
+        );
+
+        return $result;
     }
 
     public function skipCycle(int $id, int $cycleIndex): array
     {
         [$shop, $subscription] = $this->shopAndSubscription($id);
 
-        return $this->shopifySubscriptionContractService->skipCycle(
+        $result = $this->shopifySubscriptionContractService->skipCycle(
             $shop,
             $subscription->shopify_gid,
             $cycleIndex
         );
+
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_SKIPPED,
+            "Merchant skipped billing cycle #{$cycleIndex}.",
+            ['cycle_index' => $cycleIndex]
+        );
+
+        return $result;
     }
 
     public function unskipCycle(int $id, int $cycleIndex): array
     {
         [$shop, $subscription] = $this->shopAndSubscription($id);
 
-        return $this->shopifySubscriptionContractService->unskipCycle(
+        $result = $this->shopifySubscriptionContractService->unskipCycle(
             $shop,
             $subscription->shopify_gid,
             $cycleIndex
         );
+
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_UNSKIPPED,
+            "Merchant unskipped billing cycle #{$cycleIndex}.",
+            ['cycle_index' => $cycleIndex]
+        );
+
+        return $result;
     }
 
     public function rescheduleCycle(int $id, int $cycleIndex, string $billingDate): array
     {
         [$shop, $subscription] = $this->shopAndSubscription($id);
 
-        return $this->shopifySubscriptionContractService->rescheduleCycle(
+        $result = $this->shopifySubscriptionContractService->rescheduleCycle(
             $shop,
             $subscription->shopify_gid,
             $cycleIndex,
             $billingDate
         );
+
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_RESCHEDULED,
+            "Merchant rescheduled billing cycle #{$cycleIndex}.",
+            ['cycle_index' => $cycleIndex, 'billing_date' => $billingDate]
+        );
+
+        return $result;
     }
 
     public function addDiscount(int $id, array $input): array
@@ -465,6 +503,12 @@ class SubscriptionService
             throw new ShopifySellingPlanException('Subscription was created in Shopify but failed to save locally.');
         }
 
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_CREATED,
+            'Merchant created the subscription.'
+        );
+
         return $this->show($subscription->id);
     }
 
@@ -556,8 +600,9 @@ class SubscriptionService
             $subscription->shopify_gid
         );
 
+        $target = $synced ?? $subscription->fresh();
+
         if ($synced === null) {
-            // Fallback: still reflect Shopify status locally if full sync fails.
             $fallbackStatus = match ($action) {
                 'pause' => 'paused',
                 'resume' => 'active',
@@ -567,11 +612,26 @@ class SubscriptionService
 
             $subscription->status = $fallbackStatus;
             $subscription->save();
-
-            return $this->show($subscription->id);
+            $target = $subscription;
         }
 
-        return $this->show($synced->id);
+        $this->activityLogService->logMerchant(
+            $target,
+            match ($action) {
+                'pause' => SubscriptionActivityLogService::ACTION_PAUSED,
+                'resume' => SubscriptionActivityLogService::ACTION_RESUMED,
+                'cancel' => SubscriptionActivityLogService::ACTION_CANCELLED,
+                default => $action,
+            },
+            match ($action) {
+                'pause' => 'Merchant paused the subscription.',
+                'resume' => 'Merchant resumed the subscription.',
+                'cancel' => 'Merchant cancelled the subscription.',
+                default => "Merchant updated the subscription ({$action}).",
+            }
+        );
+
+        return $this->show($target->id);
     }
 
     public function update(int $id, array $payload): array
@@ -635,6 +695,12 @@ class SubscriptionService
         );
 
         $this->applyContractLocally($subscription, $contract);
+
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_UPDATED,
+            'Merchant updated the subscription.'
+        );
 
         return $this->show($subscription->id);
     }
@@ -923,6 +989,21 @@ class SubscriptionService
                 'image_url' => $product->image_url,
                 'selling_plan_name' => $product->selling_plan_name,
             ])->values()->all(),
+            'activity_logs' => $subscription->relationLoaded('activityLogs')
+                ? $subscription->activityLogs
+                    ->sortByDesc('created_at')
+                    ->values()
+                    ->map(fn ($log) => [
+                        'id' => $log->id,
+                        'action' => $log->action,
+                        'message' => $log->message,
+                        'actor_type' => $log->actor_type,
+                        'actor_label' => $log->actor_label,
+                        'meta' => $log->meta,
+                        'created_at' => $log->created_at?->format('Y-m-d H:i'),
+                    ])
+                    ->all()
+                : $this->activityLogService->forSubscription($subscription),
         ]);
     }
 

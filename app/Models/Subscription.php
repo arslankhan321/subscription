@@ -69,4 +69,9 @@ class Subscription extends Model
     {
         return $this->hasMany(SubscriptionRecurringOrder::class);
     }
+
+    public function activityLogs(): HasMany
+    {
+        return $this->hasMany(SubscriptionActivityLog::class);
+    }
 }

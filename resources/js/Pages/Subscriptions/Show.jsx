@@ -5,6 +5,7 @@ import { useBillingCycles } from "@/hooks/subscriptions/useBillingCycles";
 import { useAddDiscountModal } from "@/Components/Subscriptions/AddDiscountModal";
 import { useCancelSubscriptionModal } from "@/Components/Subscriptions/CancelSubscriptionModal";
 import { CustomerCard } from "@/Components/Subscriptions/CustomerCard";
+import SubscriptionActivityLog from "@/Components/Subscriptions/SubscriptionActivityLog";
 import {
     PaymentMethodCard,
     useSwapPaymentMethodModal,
@@ -374,7 +375,10 @@ export default function SubscriptionShow() {
         skipCycle,
         unskipCycle,
         rescheduleCycle,
-    } = useBillingCycles(id, { enabled: Boolean(id) });
+    } = useBillingCycles(id, {
+        enabled: Boolean(id),
+        onActionComplete: () => refetch({ silent: true }),
+    });
 
     const { open: openDiscountModal, modal: discountModal } = useAddDiscountModal({
         subscriptionId: id,
@@ -843,6 +847,8 @@ export default function SubscriptionShow() {
                             onUnskip={unskipCycle}
                             onReschedule={rescheduleCycle}
                         />
+
+                        <SubscriptionActivityLog logs={subscription.activity_logs ?? []} />
 
                         {subscription.recurring_orders?.length > 0 && (
                             <div className="subscription-card">

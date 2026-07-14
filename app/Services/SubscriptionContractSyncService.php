@@ -17,7 +17,8 @@ use stdClass;
 class SubscriptionContractSyncService
 {
     public function __construct(
-        protected ShopifySubscriptionContractService $shopifySubscriptionContractService
+        protected ShopifySubscriptionContractService $shopifySubscriptionContractService,
+        protected SubscriptionActivityLogService $activityLogService
     ) {}
 
     public function syncFromWebhook(User $shop, stdClass $payload): ?Subscription
@@ -55,6 +56,9 @@ class SubscriptionContractSyncService
             return $existing;
         }
 
+        $previousStatus = $existing?->status;
+        $wasNew = $existing === null;
+
         $contract = $this->shopifySubscriptionContractService->fetchContract($shop, $contractGid);
 
         if ($contract === null) {
@@ -63,10 +67,18 @@ class SubscriptionContractSyncService
                 'contract_gid' => $contractGid,
             ]);
 
-            return $this->syncFromWebhookPayloadOnly($shop, $payload);
+            $subscription = $this->syncFromWebhookPayloadOnly($shop, $payload);
+            if ($subscription !== null) {
+                $this->logWebhookLifecycle($subscription, $previousStatus, $wasNew);
+            }
+
+            return $subscription;
         }
 
-        return $this->persistContract($shop, $contract, $payload);
+        $subscription = $this->persistContract($shop, $contract, $payload);
+        $this->logWebhookLifecycle($subscription, $previousStatus, $wasNew);
+
+        return $subscription;
     }
 
     public function syncFromContractGid(User $shop, string $contractGid): ?Subscription
@@ -355,6 +367,76 @@ class SubscriptionContractSyncService
                 ->whereNotIn('shopify_order_id', $orderIds)
                 ->delete();
         }
+    }
+
+    private function logWebhookLifecycle(
+        Subscription $subscription,
+        ?string $previousStatus,
+        bool $wasNew
+    ): void {
+        $newStatus = strtolower((string) $subscription->status);
+        $previous = $previousStatus !== null ? strtolower($previousStatus) : null;
+
+        if ($wasNew) {
+            if ($this->recentlyLogged($subscription, SubscriptionActivityLogService::ACTION_CREATED)) {
+                return;
+            }
+
+            $this->activityLogService->log(
+                $subscription,
+                SubscriptionActivityLogService::ACTION_CREATED,
+                'The subscription was created.',
+                'system',
+                'System'
+            );
+
+            return;
+        }
+
+        if ($previous === null || $previous === $newStatus) {
+            return;
+        }
+
+        [$action, $message] = match ($newStatus) {
+            'paused' => [
+                SubscriptionActivityLogService::ACTION_PAUSED,
+                'The subscription was paused.',
+            ],
+            'active' => [
+                SubscriptionActivityLogService::ACTION_RESUMED,
+                'The subscription was resumed.',
+            ],
+            'cancelled' => [
+                SubscriptionActivityLogService::ACTION_CANCELLED,
+                'The subscription was cancelled.',
+            ],
+            default => [null, null],
+        };
+
+        if ($action === null) {
+            return;
+        }
+
+        if ($this->recentlyLogged($subscription, $action)) {
+            return;
+        }
+
+        $this->activityLogService->log(
+            $subscription,
+            $action,
+            $message,
+            'system',
+            'System'
+        );
+    }
+
+    private function recentlyLogged(Subscription $subscription, string $action): bool
+    {
+        return \App\Models\SubscriptionActivityLog::query()
+            ->where('subscription_id', $subscription->id)
+            ->where('action', $action)
+            ->where('created_at', '>=', now()->subMinutes(2))
+            ->exists();
     }
 
     private function gidToId(mixed $gid): ?int
