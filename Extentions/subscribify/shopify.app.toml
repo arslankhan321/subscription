@@ -2,7 +2,7 @@
 
 client_id = "a6444af8f1f7bd85047bfcdf2ddb0a16"
 name = "Subscribify"
-application_url = "https://sleeping-nursery-simon-timer.trycloudflare.com"
+application_url = "https://connectors-specialties-apt-agriculture.trycloudflare.com"
 embedded = true
 
 [build]
@@ -19,10 +19,10 @@ use_legacy_install_flow = true
 
 [auth]
 redirect_urls = [
-  "https://sleeping-nursery-simon-timer.trycloudflare.com/authenticate"
+  "https://connectors-specialties-apt-agriculture.trycloudflare.com/authenticate"
 ]
 
 [app_proxy]
-url = "https://sleeping-nursery-simon-timer.trycloudflare.com"
+url = "https://connectors-specialties-apt-agriculture.trycloudflare.com"
 subpath = "subscribify"
 prefix = "apps"

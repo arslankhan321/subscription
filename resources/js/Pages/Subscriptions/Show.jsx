@@ -5,6 +5,7 @@ import { useBillingCycles } from "@/hooks/subscriptions/useBillingCycles";
 import { useAddDiscountModal } from "@/Components/Subscriptions/AddDiscountModal";
 import { useCancelSubscriptionModal } from "@/Components/Subscriptions/CancelSubscriptionModal";
 import { CustomerCard } from "@/Components/Subscriptions/CustomerCard";
+import { PlanSubscriptionPricing } from "@/Components/Subscriptions/PlanSubscriptionPricing";
 import SubscriptionActivityLog from "@/Components/Subscriptions/SubscriptionActivityLog";
 import {
     PaymentMethodCard,
@@ -667,88 +668,109 @@ export default function SubscriptionShow() {
                                         product.currency_code || subscription.currency_code;
 
                                     return (
-                                        <div key={product.id} className="subscription-item-row">
-                                            {product.image_url ? (
-                                                <img
-                                                    className="subscription-item-row__image"
-                                                    src={product.image_url}
-                                                    alt={product.title}
-                                                />
-                                            ) : (
-                                                <div className="subscription-item-row__placeholder">
-                                                    ITEM
-                                                </div>
-                                            )}
+                                        <div
+                                            key={product.id}
+                                            className="subscription-item-block"
+                                        >
+                                            <div className="subscription-item-row">
+                                                {product.image_url ? (
+                                                    <img
+                                                        className="subscription-item-row__image"
+                                                        src={product.image_url}
+                                                        alt={product.title}
+                                                    />
+                                                ) : (
+                                                    <div className="subscription-item-row__placeholder">
+                                                        ITEM
+                                                    </div>
+                                                )}
 
-                                            <div>
-                                                <p className="subscription-item-row__title">
-                                                    {product.title}
-                                                </p>
-                                                <p className="subscription-item-row__meta">
-                                                    {product.variant_title || "Default variant"}
-                                                    {product.sku ? ` • SKU: ${product.sku}` : ""}
-                                                </p>
-                                                <p className="subscription-item-row__meta">
-                                                    {product.quantity} x{" "}
+                                                <div>
+                                                    <p className="subscription-item-row__title">
+                                                        {product.title}
+                                                    </p>
+                                                    <p className="subscription-item-row__meta">
+                                                        {product.variant_title || "Default variant"}
+                                                        {product.sku ? ` • SKU: ${product.sku}` : ""}
+                                                    </p>
+                                                    {product.selling_plan_name ? (
+                                                        <p className="subscription-item-row__meta">
+                                                            {product.selling_plan_name}
+                                                        </p>
+                                                    ) : null}
+                                                    <p className="subscription-item-row__meta">
+                                                        {product.quantity} x{" "}
+                                                        {pricing.has_discount ? (
+                                                            <>
+                                                                <span className="subscription-price--original">
+                                                                    {formatMoney(
+                                                                        pricing.unit_price,
+                                                                        currency
+                                                                    )}
+                                                                </span>{" "}
+                                                                <span className="subscription-price--discounted">
+                                                                    {formatMoney(
+                                                                        pricing.discounted_unit_price,
+                                                                        currency
+                                                                    )}
+                                                                </span>
+                                                            </>
+                                                        ) : (
+                                                            formatMoney(
+                                                                pricing.unit_price,
+                                                                currency
+                                                            )
+                                                        )}
+                                                    </p>
+                                                    {pricing.applicable_discounts.length > 0 && (
+                                                        <div className="subscription-item-discounts">
+                                                            {pricing.applicable_discounts.map(
+                                                                (discount) => (
+                                                                    <s-badge
+                                                                        key={discount.id}
+                                                                        tone="success"
+                                                                    >
+                                                                        {discount.title}:{" "}
+                                                                        {formatDiscountLabel(
+                                                                            discount,
+                                                                            currency
+                                                                        )}
+                                                                    </s-badge>
+                                                                )
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                <div className="subscription-item-row__price">
                                                     {pricing.has_discount ? (
                                                         <>
                                                             <span className="subscription-price--original">
                                                                 {formatMoney(
-                                                                    pricing.unit_price,
+                                                                    pricing.original_total,
                                                                     currency
                                                                 )}
-                                                            </span>{" "}
+                                                            </span>
                                                             <span className="subscription-price--discounted">
                                                                 {formatMoney(
-                                                                    pricing.discounted_unit_price,
+                                                                    pricing.discounted_total,
                                                                     currency
                                                                 )}
                                                             </span>
                                                         </>
                                                     ) : (
-                                                        formatMoney(pricing.unit_price, currency)
+                                                        formatMoney(
+                                                            pricing.original_total,
+                                                            currency
+                                                        )
                                                     )}
-                                                </p>
-                                                {pricing.applicable_discounts.length > 0 && (
-                                                    <div className="subscription-item-discounts">
-                                                        {pricing.applicable_discounts.map(
-                                                            (discount) => (
-                                                                <s-badge
-                                                                    key={discount.id}
-                                                                    tone="success"
-                                                                >
-                                                                    {discount.title}:{" "}
-                                                                    {formatDiscountLabel(
-                                                                        discount,
-                                                                        currency
-                                                                    )}
-                                                                </s-badge>
-                                                            )
-                                                        )}
-                                                    </div>
-                                                )}
+                                                </div>
                                             </div>
 
-                                            <div className="subscription-item-row__price">
-                                                {pricing.has_discount ? (
-                                                    <>
-                                                        <span className="subscription-price--original">
-                                                            {formatMoney(
-                                                                pricing.original_total,
-                                                                currency
-                                                            )}
-                                                        </span>
-                                                        <span className="subscription-price--discounted">
-                                                            {formatMoney(
-                                                                pricing.discounted_total,
-                                                                currency
-                                                            )}
-                                                        </span>
-                                                    </>
-                                                ) : (
-                                                    formatMoney(pricing.original_total, currency)
-                                                )}
-                                            </div>
+                                            <PlanSubscriptionPricing
+                                                planDiscount={product.plan_discount}
+                                                currencyCode={currency}
+                                            />
                                         </div>
                                     );
                                 })}
@@ -762,7 +784,7 @@ export default function SubscriptionShow() {
 
                                     {(subscription.discounts ?? []).length > 0 ? (
                                         <div className="subscription-discount-list">
-                                            {subscription.discounts.map((discount) => (
+                                            {(subscription.discounts ?? []).map((discount) => (
                                                 <div
                                                     key={discount.id}
                                                     className="subscription-discount-item subscription-discount-item--row"

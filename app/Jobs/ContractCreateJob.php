@@ -12,7 +12,7 @@ use Osiset\ShopifyApp\Objects\Values\ShopDomain;
 use stdClass;
 use Throwable;
 
-class SubscriptionContractsJob implements ShouldQueue
+class ContractCreateJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 

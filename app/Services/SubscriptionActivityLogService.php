@@ -25,6 +25,14 @@ class SubscriptionActivityLogService
 
     public const ACTION_RESCHEDULED = 'rescheduled';
 
+    public const ACTION_PAYMENT_FAILED = 'payment_failed';
+
+    public const ACTION_PAYMENT_RETRY = 'payment_retry';
+
+    public const ACTION_PAYMENT_RECOVERED = 'payment_recovered';
+
+    public const ACTION_PAYMENT_EXHAUSTED = 'payment_exhausted';
+
     public function log(
         Subscription $subscription,
         string $action,
@@ -47,6 +55,11 @@ class SubscriptionActivityLogService
     public function logMerchant(Subscription $subscription, string $action, string $message, array $meta = []): SubscriptionActivityLog
     {
         return $this->log($subscription, $action, $message, 'merchant', 'Merchant', $meta);
+    }
+
+    public function logSystem(Subscription $subscription, string $action, string $message, array $meta = []): SubscriptionActivityLog
+    {
+        return $this->log($subscription, $action, $message, 'system', 'System', $meta);
     }
 
     /**

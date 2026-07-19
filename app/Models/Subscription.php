@@ -74,4 +74,9 @@ class Subscription extends Model
     {
         return $this->hasMany(SubscriptionActivityLog::class);
     }
+
+    public function paymentRecoveries(): HasMany
+    {
+        return $this->hasMany(SubscriptionPaymentRecovery::class);
+    }
 }

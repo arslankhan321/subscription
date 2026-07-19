@@ -5,10 +5,13 @@ namespace App\Services;
 use App\Exceptions\ShopifySellingPlanException;
 use App\Models\Customer;
 use App\Models\Subscription;
+use App\Models\SubscriptionPlanOption;
+use App\Models\User;
 use App\Services\Shopify\ShopifyGraphqlService;
 use App\Services\Shopify\ShopifySubscriptionContractService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Collection;
 
 class SubscriptionService
 {
@@ -162,9 +165,12 @@ class SubscriptionService
         }
     }
 
-    public function chargeCycle(int $id, int $cycleIndex): array
+    public function chargeCycle(int $id, int $cycleIndex, bool $asSystem = false): array
     {
         [$shop, $subscription] = $this->shopAndSubscription($id);
+        $subscription->loadMissing('products');
+
+        $pricingResult = $this->applyPlanPricingForCycle($shop, $subscription, $cycleIndex);
 
         $result = $this->shopifySubscriptionContractService->chargeCycle(
             $shop,
@@ -172,14 +178,84 @@ class SubscriptionService
             $cycleIndex
         );
 
-        $this->activityLogService->logMerchant(
-            $subscription,
-            SubscriptionActivityLogService::ACTION_CHARGED,
-            "Merchant charged billing cycle #{$cycleIndex}.",
-            ['cycle_index' => $cycleIndex]
-        );
+        $nextBillingDate = null;
+        $chargeSucceeded = empty($result['error_message']);
 
-        return $result;
+        if ($chargeSucceeded) {
+            $nextBillingDate = $this->syncNextBillingDateAfterCharge(
+                $shop,
+                $subscription,
+                $cycleIndex
+            );
+        }
+
+        $message = $asSystem
+            ? "System charged billing cycle #{$cycleIndex}."
+            : "Merchant charged billing cycle #{$cycleIndex}.";
+
+        $meta = [
+            'cycle_index' => $cycleIndex,
+            'pricing_updated' => $pricingResult['updated'],
+            'applied_pricing' => $pricingResult['applied_pricing'],
+            'source' => $asSystem ? 'system' : 'merchant',
+            'next_billing_date' => $nextBillingDate,
+        ];
+
+        if ($asSystem) {
+            $this->activityLogService->logSystem(
+                $subscription,
+                SubscriptionActivityLogService::ACTION_CHARGED,
+                $message,
+                $meta
+            );
+        } else {
+            $this->activityLogService->logMerchant(
+                $subscription,
+                SubscriptionActivityLogService::ACTION_CHARGED,
+                $message,
+                $meta
+            );
+        }
+
+        return array_merge($result, [
+            'pricing_updated' => $pricingResult['updated'],
+            'applied_pricing' => $pricingResult['applied_pricing'],
+            'next_billing_date' => $nextBillingDate,
+        ]);
+    }
+
+    private function syncNextBillingDateAfterCharge(
+        $shop,
+        Subscription $subscription,
+        int $chargedCycleIndex
+    ): ?string {
+        try {
+            $nextDate = $this->shopifySubscriptionContractService->resolveNextBillingDateAfterCycle(
+                $shop,
+                $subscription->shopify_gid,
+                $chargedCycleIndex
+            );
+
+            if (! $nextDate) {
+                return $subscription->next_billing_date?->toIso8601String();
+            }
+
+            $subscription->forceFill([
+                'next_billing_date' => Carbon::parse($nextDate),
+                'last_payment_status' => 'SUCCEEDED',
+                'last_billing_attempt_error_type' => null,
+            ])->save();
+
+            return Carbon::parse($nextDate)->toIso8601String();
+        } catch (\Throwable $exception) {
+            \Illuminate\Support\Facades\Log::warning('Unable to sync next billing date after charge', [
+                'subscription_id' => $subscription->id,
+                'cycle_index' => $chargedCycleIndex,
+                'message' => $exception->getMessage(),
+            ]);
+
+            return $subscription->next_billing_date?->toIso8601String();
+        }
     }
 
     public function skipCycle(int $id, int $cycleIndex): array
@@ -974,21 +1050,7 @@ class SubscriptionService
                     'processed_at' => $order->processed_at?->toIso8601String(),
                 ])
                 ->all(),
-            'products' => $subscription->products->map(fn ($product) => [
-                'id' => $product->id,
-                'shopify_line_id' => $product->shopify_line_id,
-                'shopify_product_id' => $product->shopify_product_id,
-                'shopify_variant_id' => $product->shopify_variant_id,
-                'shopify_selling_plan_id' => $product->shopify_selling_plan_id,
-                'title' => $product->title,
-                'variant_title' => $product->variant_title,
-                'sku' => $product->sku,
-                'quantity' => $product->quantity,
-                'current_price' => (float) $product->current_price,
-                'currency_code' => $product->currency_code,
-                'image_url' => $product->image_url,
-                'selling_plan_name' => $product->selling_plan_name,
-            ])->values()->all(),
+            'products' => $this->transformDetailProducts($subscription)->all(),
             'activity_logs' => $subscription->relationLoaded('activityLogs')
                 ? $subscription->activityLogs
                     ->sortByDesc('created_at')
@@ -1029,6 +1091,217 @@ class SubscriptionService
         ];
     }
 
+    /**
+     * Before charging a cycle, update line prices when the plan's afterCycle
+     * recurring discount should apply (Shopify does not do this automatically).
+     *
+     * @return array{updated: bool, applied_pricing: list<array<string, mixed>>}
+     */
+    private function applyPlanPricingForCycle(User $shop, Subscription $subscription, int $cycleIndex): array
+    {
+        $planOptions = $this->resolvePlanOptionsForProducts($subscription->products);
+        $lineUpdates = [];
+        $appliedPricing = [];
+
+        foreach ($subscription->products as $product) {
+            if (! $product->shopify_line_id) {
+                continue;
+            }
+
+            $planOption = $planOptions->get((string) $product->shopify_selling_plan_id);
+
+            if (! $planOption) {
+                continue;
+            }
+
+            $basePrice = $this->ensureProductBasePrice($product, $planOption, $subscription);
+
+            $target = $this->resolveCycleTargetPrice(
+                (float) $product->current_price,
+                $basePrice,
+                $planOption,
+                $cycleIndex
+            );
+
+            if ($target === null) {
+                continue;
+            }
+
+            $currentPrice = round((float) $product->current_price, 2);
+            $targetPrice = round($target['price'], 2);
+
+            $appliedPricing[] = [
+                'product_id' => $product->id,
+                'line_id' => $product->shopify_line_id,
+                'cycle_index' => $cycleIndex,
+                'pricing_stage' => $target['stage'],
+                'after_cycle' => $target['after_cycle'],
+                'base_price' => $basePrice,
+                'from_price' => $currentPrice,
+                'to_price' => $targetPrice,
+            ];
+
+            if (abs($currentPrice - $targetPrice) < 0.005) {
+                continue;
+            }
+
+            $lineUpdates[] = [
+                'id' => $product->shopify_line_id,
+                'current_price' => number_format($targetPrice, 2, '.', ''),
+                'product' => $product,
+            ];
+        }
+
+        if ($lineUpdates === []) {
+            return [
+                'updated' => false,
+                'applied_pricing' => $appliedPricing,
+            ];
+        }
+
+        $contract = $this->shopifySubscriptionContractService->updateContractLinePrices(
+            $shop,
+            $subscription->shopify_gid,
+            collect($lineUpdates)
+                ->map(fn (array $line) => [
+                    'id' => $line['id'],
+                    'current_price' => $line['current_price'],
+                ])
+                ->all()
+        );
+
+        foreach ($lineUpdates as $line) {
+            $line['product']->update([
+                'current_price' => $line['current_price'],
+            ]);
+        }
+
+        if ($contract !== []) {
+            $this->applyContractLocally($subscription->fresh(['products']), $contract);
+        }
+
+        return [
+            'updated' => true,
+            'applied_pricing' => $appliedPricing,
+        ];
+    }
+
+    /**
+     * Persist catalog/compare-at base once so later % discounts don't reverse incorrectly.
+     */
+    private function ensureProductBasePrice(
+        $product,
+        SubscriptionPlanOption $option,
+        Subscription $subscription
+    ): float {
+        $currentPrice = (float) $product->current_price;
+        $giveDiscount = (bool) $option->give_discount;
+        $firstAmount = (float) ($option->discount_amount ?? 0);
+        $laterAmount = (float) ($option->later_discount_amount ?? 0);
+        $firstType = (string) ($option->discount_type ?? 'Percentage off');
+        $laterType = (string) ($option->later_discount_type ?? $firstType);
+        $changeAfter = (bool) $option->change_discount_after_orders;
+        $tolerance = 0.05;
+
+        $hasRecurringOrders = $subscription->relationLoaded('recurringOrders')
+            ? $subscription->recurringOrders->isNotEmpty()
+            : $subscription->recurringOrders()->exists();
+
+        if ($product->base_price !== null && (float) $product->base_price > 0) {
+            $existingBase = round((float) $product->base_price, 2);
+            $matchesFirst = $giveDiscount && $firstAmount > 0
+                && abs($this->applyPlanAdjustment($existingBase, $firstAmount, $firstType) - $currentPrice) <= $tolerance;
+            $matchesLater = $laterAmount > 0
+                && abs($this->applyPlanAdjustment($existingBase, $laterAmount, $laterType) - $currentPrice) <= $tolerance;
+
+            // Keep base when it explains the current price for the expected stage.
+            if ($matchesLater) {
+                return $existingBase;
+            }
+
+            if ($matchesFirst && ! ($hasRecurringOrders && $changeAfter && $laterAmount > $firstAmount)) {
+                return $existingBase;
+            }
+        }
+
+        // After renewals, current_price is usually the later discount.
+        // Fresh checkout lines still carry the initial discount.
+        if ($changeAfter && $hasRecurringOrders && $laterAmount > 0) {
+            $base = $this->resolveBasePriceFromCurrent(
+                $currentPrice,
+                true,
+                $laterAmount,
+                $laterType
+            );
+        } elseif ($giveDiscount && $firstAmount > 0) {
+            $base = $this->resolveBasePriceFromCurrent(
+                $currentPrice,
+                true,
+                $firstAmount,
+                $firstType
+            );
+        } else {
+            $base = $currentPrice;
+        }
+
+        $base = round($base, 2);
+        $product->forceFill(['base_price' => $base])->save();
+
+        return $base;
+    }
+
+    /**
+     * @return array{price: float, stage: string, after_cycle: int|null}|null
+     */
+    private function resolveCycleTargetPrice(
+        float $currentPrice,
+        float $basePrice,
+        SubscriptionPlanOption $option,
+        int $cycleIndex
+    ): ?array {
+        $giveDiscount = (bool) $option->give_discount;
+        $changeAfter = (bool) $option->change_discount_after_orders;
+
+        if (! $changeAfter) {
+            return null;
+        }
+
+        $firstAmount = (float) ($option->discount_amount ?? 0);
+        $laterAmount = (float) ($option->later_discount_amount ?? 0);
+        $firstType = (string) ($option->discount_type ?? 'Percentage off');
+        $laterType = (string) ($option->later_discount_type ?? $firstType);
+        $afterCycle = max(1, (int) ($option->later_discount_after_orders ?? 1));
+        $useLaterDiscount = $cycleIndex > $afterCycle;
+
+        if ($useLaterDiscount) {
+            return [
+                'price' => round(
+                    $this->applyPlanAdjustment($basePrice, $laterAmount, $laterType),
+                    2
+                ),
+                'stage' => 'recurring',
+                'after_cycle' => $afterCycle,
+            ];
+        }
+
+        if ($giveDiscount && $firstAmount > 0) {
+            return [
+                'price' => round(
+                    $this->applyPlanAdjustment($basePrice, $firstAmount, $firstType),
+                    2
+                ),
+                'stage' => 'initial',
+                'after_cycle' => $afterCycle,
+            ];
+        }
+
+        return [
+            'price' => round($currentPrice, 2),
+            'stage' => 'initial',
+            'after_cycle' => $afterCycle,
+        ];
+    }
+
     private function resolveSubscriptionType($products): string
     {
         $sellingPlanName = $products->first()?->selling_plan_name;
@@ -1057,6 +1330,199 @@ class SubscriptionService
         };
 
         return "Repeats every {$count} {$label}";
+    }
+
+    private function transformDetailProducts(Subscription $subscription): Collection
+    {
+        $subscription->loadMissing('recurringOrders');
+        $planOptions = $this->resolvePlanOptionsForProducts($subscription->products);
+
+        return $subscription->products->map(function ($product) use ($subscription, $planOptions) {
+            $planOption = $planOptions->get((string) $product->shopify_selling_plan_id);
+
+            return [
+                'id' => $product->id,
+                'shopify_line_id' => $product->shopify_line_id,
+                'shopify_product_id' => $product->shopify_product_id,
+                'shopify_variant_id' => $product->shopify_variant_id,
+                'shopify_selling_plan_id' => $product->shopify_selling_plan_id,
+                'title' => $product->title,
+                'variant_title' => $product->variant_title,
+                'sku' => $product->sku,
+                'quantity' => $product->quantity,
+                'current_price' => (float) $product->current_price,
+                'base_price' => $product->base_price !== null ? (float) $product->base_price : null,
+                'currency_code' => $product->currency_code,
+                'image_url' => $product->image_url,
+                'selling_plan_name' => $product->selling_plan_name,
+                'plan_discount' => $this->transformPlanDiscount(
+                    $planOption,
+                    $product,
+                    $subscription
+                ),
+            ];
+        })->values();
+    }
+
+    /**
+     * @param  Collection<int, \App\Models\SubscriptionProduct>  $products
+     * @return Collection<string, SubscriptionPlanOption>
+     */
+    private function resolvePlanOptionsForProducts(Collection $products): Collection
+    {
+        $sellingPlanIds = $products
+            ->pluck('shopify_selling_plan_id')
+            ->filter()
+            ->map(fn ($id) => (string) $id)
+            ->unique()
+            ->values();
+
+        if ($sellingPlanIds->isEmpty()) {
+            return collect();
+        }
+
+        $gids = $sellingPlanIds
+            ->map(fn (string $id) => str_starts_with($id, 'gid://')
+                ? $id
+                : "gid://shopify/SellingPlan/{$id}")
+            ->all();
+
+        return SubscriptionPlanOption::query()
+            ->where(function ($query) use ($sellingPlanIds, $gids) {
+                $query->whereIn('shopify_plan_id', $sellingPlanIds->all())
+                    ->orWhereIn('shopify_plan_id', $gids);
+            })
+            ->get()
+            ->keyBy(fn (SubscriptionPlanOption $option) => (string) (
+                $this->gidToNumericId($option->shopify_plan_id) ?? $option->shopify_plan_id
+            ));
+    }
+
+    private function transformPlanDiscount(
+        ?SubscriptionPlanOption $option,
+        $product,
+        Subscription $subscription
+    ): ?array {
+        if (! $option) {
+            return null;
+        }
+
+        $giveDiscount = (bool) $option->give_discount;
+        $changeAfter = (bool) $option->change_discount_after_orders;
+
+        if (! $changeAfter) {
+            return null;
+        }
+
+        $firstAmount = (float) ($option->discount_amount ?? 0);
+        $laterAmount = (float) ($option->later_discount_amount ?? 0);
+        $firstType = (string) ($option->discount_type ?? 'Percentage off');
+        $laterType = (string) ($option->later_discount_type ?? $firstType);
+        $afterOrders = max(1, (int) ($option->later_discount_after_orders ?? 1));
+
+        $intervalCount = max(
+            1,
+            (int) ($subscription->delivery_interval_count
+                ?? $option->delivery_frequency
+                ?? 1)
+        );
+        $interval = $subscription->delivery_interval
+            ?? $option->delivery_interval
+            ?? 'month';
+        $frequencyLabel = $this->formatIntervalLabel($interval, $intervalCount);
+
+        $basePrice = $this->ensureProductBasePrice($product, $option, $subscription);
+
+        $firstPrice = $giveDiscount && $firstAmount > 0
+            ? round($this->applyPlanAdjustment($basePrice, $firstAmount, $firstType), 2)
+            : round($basePrice, 2);
+        $recurringPrice = round(
+            $this->applyPlanAdjustment($basePrice, $laterAmount, $laterType),
+            2
+        );
+
+        $summary = sprintf(
+            'First payment %s, then %s every %s',
+            number_format($firstPrice, 2, '.', ''),
+            number_format($recurringPrice, 2, '.', ''),
+            $frequencyLabel
+        );
+
+        return [
+            'give_discount' => $giveDiscount,
+            'discount_amount' => $firstAmount,
+            'discount_type' => $firstType,
+            'change_discount_after_orders' => true,
+            'later_discount_amount' => $laterAmount,
+            'later_discount_after_orders' => $afterOrders,
+            'later_discount_type' => $laterType,
+            'base_price' => round($basePrice, 2),
+            'first_price' => $firstPrice,
+            'recurring_price' => $recurringPrice,
+            'frequency_label' => $frequencyLabel,
+            'summary' => $summary,
+        ];
+    }
+
+    private function resolveBasePriceFromCurrent(
+        float $currentPrice,
+        bool $giveDiscount,
+        float $amount,
+        string $type
+    ): float {
+        if (! $giveDiscount || $amount <= 0) {
+            return $currentPrice;
+        }
+
+        if ($this->isPercentageDiscount($type)) {
+            $factor = 1 - ($amount / 100);
+
+            return $factor > 0 ? $currentPrice / $factor : $currentPrice;
+        }
+
+        return $currentPrice + $amount;
+    }
+
+    private function applyPlanAdjustment(float $basePrice, float $amount, string $type): float
+    {
+        if ($amount <= 0) {
+            return $basePrice;
+        }
+
+        if ($this->isPercentageDiscount($type)) {
+            return max(0, $basePrice * (1 - ($amount / 100)));
+        }
+
+        return max(0, $basePrice - $amount);
+    }
+
+    private function formatPlanAdjustmentLabel(float $amount, string $type): string
+    {
+        if ($this->isPercentageDiscount($type)) {
+            return rtrim(rtrim(number_format($amount, 2, '.', ''), '0'), '.') . '%';
+        }
+
+        return number_format($amount, 2, '.', '');
+    }
+
+    private function isPercentageDiscount(string $type): bool
+    {
+        return str_contains(strtolower($type), 'percentage');
+    }
+
+    private function formatIntervalLabel(?string $interval, ?int $count): string
+    {
+        $count = max(1, (int) ($count ?? 1));
+        $normalized = strtolower((string) ($interval ?? 'month'));
+        $label = match ($normalized) {
+            'day', 'days' => $count === 1 ? 'day' : 'days',
+            'week', 'weeks' => $count === 1 ? 'week' : 'weeks',
+            'month', 'months' => $count === 1 ? 'month' : 'months',
+            'year', 'years' => $count === 1 ? 'year' : 'years',
+            default => $normalized,
+        };
+
+        return $count === 1 ? $label : "{$count} {$label}";
     }
 
     private function shopId(): int

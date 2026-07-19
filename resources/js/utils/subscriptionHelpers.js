@@ -192,6 +192,63 @@ export function formatDiscountLabel(discount, currencyCode = "USD") {
     return "Discount";
 }
 
+export function formatPlanDiscountSummary(planDiscount, currencyCode = "USD") {
+    if (!planDiscount) {
+        return null;
+    }
+
+    const frequency = planDiscount.frequency_label || "delivery";
+    const firstPrice = Number(planDiscount.first_price);
+    const recurringPrice = Number(planDiscount.recurring_price);
+    const giveDiscount = Boolean(planDiscount.give_discount);
+    const changeAfter = Boolean(planDiscount.change_discount_after_orders);
+
+    if (
+        giveDiscount &&
+        changeAfter &&
+        Number.isFinite(firstPrice) &&
+        Number.isFinite(recurringPrice) &&
+        Math.abs(firstPrice - recurringPrice) > 0.0001
+    ) {
+        return `First payment ${formatMoney(firstPrice, currencyCode)}, then ${formatMoney(
+            recurringPrice,
+            currencyCode
+        )} every ${frequency}`;
+    }
+
+    if (planDiscount.summary) {
+        return planDiscount.summary;
+    }
+
+    if (giveDiscount) {
+        return `${formatPlanDiscountBadge(
+            planDiscount.discount_amount,
+            planDiscount.discount_type
+        )} off every ${frequency}`;
+    }
+
+    if (changeAfter) {
+        return `After ${planDiscount.later_discount_after_orders || 1} order(s): ${formatPlanDiscountBadge(
+            planDiscount.later_discount_amount,
+            planDiscount.later_discount_type
+        )} off every ${frequency}`;
+    }
+
+    return null;
+}
+
+export function formatPlanDiscountBadge(amount, type) {
+    const value = Number(amount || 0);
+
+    if (String(type || "")
+        .toLowerCase()
+        .includes("percentage")) {
+        return `${Number.isInteger(value) ? value : value.toFixed(2)}%`;
+    }
+
+    return formatMoney(value);
+}
+
 export function goToSubscriptionCreate(navigate) {
     navigate(buildShopifyPath("/subscriptions/create"));
 }

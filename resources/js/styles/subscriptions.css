@@ -986,6 +986,118 @@
     color: #202223;
 }
 
+.subscription-item-row__plan-discount {
+    margin: 0.25rem 0 0;
+    color: #2c6ecb;
+    font-size: 0.8rem;
+    font-weight: 550;
+    line-height: 1.35;
+}
+
+.subscription-item-block {
+    padding-bottom: 0.85rem;
+    margin-bottom: 0.85rem;
+    border-bottom: 1px solid #f1f2f3;
+}
+
+.subscription-item-block:last-of-type {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+.subscription-item-block .subscription-item-row {
+    border-bottom: none;
+    margin-bottom: 0;
+    padding-bottom: 0;
+}
+
+.subscription-pricing {
+    margin-top: 0.75rem;
+}
+
+.subscription-pricing__title {
+    margin: 0 0 0.45rem;
+    font-size: 0.875rem;
+    font-weight: 650;
+    color: #202223;
+}
+
+.subscription-pricing__box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    padding: 0.75rem 0.9rem;
+    border-radius: 10px;
+    background: #f6f6f7;
+}
+
+.subscription-pricing-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 1.1fr) minmax(110px, auto) minmax(110px, auto) auto;
+    align-items: center;
+    gap: 0.65rem 1rem;
+}
+
+.subscription-pricing-row__label {
+    color: #6d7175;
+    font-size: 0.875rem;
+}
+
+.subscription-pricing-row__price {
+    color: #202223;
+    font-size: 0.875rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.subscription-pricing-row__compare {
+    color: #8c9196;
+    font-size: 0.875rem;
+    text-decoration: line-through;
+    white-space: nowrap;
+}
+
+.subscription-pricing-row__badge {
+    justify-self: end;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    background: #e3f1df;
+    color: #1a7f4b;
+    font-size: 0.75rem;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+    .subscription-pricing-row {
+        grid-template-columns: 1fr auto auto;
+        grid-template-areas:
+            "label badge badge"
+            "price compare badge";
+        gap: 0.25rem 0.75rem;
+    }
+
+    .subscription-pricing-row__label {
+        grid-area: label;
+    }
+
+    .subscription-pricing-row__price {
+        grid-area: price;
+    }
+
+    .subscription-pricing-row__compare {
+        grid-area: compare;
+    }
+
+    .subscription-pricing-row__badge {
+        grid-area: badge;
+        align-self: start;
+    }
+}
+
 .subscription-item-discounts {
     display: flex;
     flex-wrap: wrap;

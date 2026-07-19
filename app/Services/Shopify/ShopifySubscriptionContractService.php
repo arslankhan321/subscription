@@ -4,6 +4,9 @@ namespace App\Services\Shopify;
 
 use App\Models\User;
 use App\Support\PhoneNumber;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class ShopifySubscriptionContractService
 {
@@ -1819,21 +1822,264 @@ class ShopifySubscriptionContractService
         ];
     }
 
+    /**
+     * Update only line current prices on a subscription contract.
+     *
+     * @param  list<array{id: string, current_price: float|string}>  $lines
+     */
+    public function updateContractLinePrices(User $shop, string $contractGid, array $lines): array
+    {
+        $updates = collect($lines)
+            ->filter(fn (array $line) => ! empty($line['id']) && array_key_exists('current_price', $line))
+            ->values()
+            ->all();
+
+        if ($updates === []) {
+            return $this->fetchContract($shop, $contractGid) ?? [];
+        }
+
+        $draftId = $this->createContractDraft($shop, $contractGid);
+
+        $lineUpdateMutation = <<<'GQL'
+        mutation subscriptionDraftLineUpdate($draftId: ID!, $lineId: ID!, $input: SubscriptionLineUpdateInput!) {
+            subscriptionDraftLineUpdate(draftId: $draftId, lineId: $lineId, input: $input) {
+                lineUpdated {
+                    id
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        foreach ($updates as $line) {
+            $this->graphql->mutationForShop($shop, 'subscriptionDraftLineUpdate', $lineUpdateMutation, [
+                'draftId' => $draftId,
+                'lineId' => $line['id'],
+                'input' => [
+                    'currentPrice' => (string) $line['current_price'],
+                ],
+            ]);
+        }
+
+        $this->commitContractDraft($shop, $draftId);
+
+        return $this->fetchContract($shop, $contractGid) ?? [];
+    }
+
     public function chargeCycle(User $shop, string $contractGid, int $cycleIndex): array
     {
+        $cycle = $this->fetchBillingCycleByIndex($shop, $contractGid, $cycleIndex);
+
+        // Path A: expected date already in the past / next 24h, OR we can
+        // schedule-edit it into that window (billingDate must stay in-cycle).
+        // Then subscriptionBillingCycleCharge sets originTime = now for future dates.
+        if ($this->canChargeWithCycleCharge($cycle)) {
+            $this->rescheduleExpectedDateIntoChargeWindow($shop, $contractGid, $cycleIndex, $cycle);
+
+            return $this->finalizeBillingAttempt(
+                $shop,
+                $this->createCycleChargeAttempt($shop, $contractGid, $cycleIndex),
+                $cycleIndex
+            );
+        }
+
+        // Path B: cycle starts more than 24h out — CycleCharge / ScheduleEdit
+        // cannot pull expected date into the billable window (OUT_OF_BOUNDS).
+        // Use AttemptCreate with originTime inside the cycle, then open any
+        // SCHEDULED fulfillment orders so the order is actionable immediately.
+        $attempt = $this->createBillingAttemptForCycle(
+            $shop,
+            $contractGid,
+            $cycleIndex,
+            $this->resolveOriginTimeForCycle($cycle)
+        );
+
+        $result = $this->finalizeBillingAttempt($shop, $attempt, $cycleIndex);
+
+        if (! empty($result['order_id'])) {
+            $this->openScheduledFulfillmentOrders($shop, $result['order_id']);
+        }
+
+        return $result;
+    }
+
+    /**
+     * True when CycleCharge is possible: expected already ≤24h ahead, or we can
+     * move expected to a date ≤24h ahead that still lies inside the cycle window.
+     */
+    private function canChargeWithCycleCharge(?array $cycle): bool
+    {
+        if (! $cycle) {
+            return true;
+        }
+
+        $now = now('UTC');
+        $chargeWindowEnds = $now->copy()->addHours(24);
+
+        $expected = $this->parseCycleDate($cycle['billing_attempt_expected_date'] ?? null);
+
+        if ($expected && $expected->lte($chargeWindowEnds)) {
+            return true;
+        }
+
+        $earliestInCycle = $this->earliestChargeableDateInCycle($cycle, $now);
+
+        return $earliestInCycle !== null && $earliestInCycle->lte($chargeWindowEnds);
+    }
+
+    private function rescheduleExpectedDateIntoChargeWindow(
+        User $shop,
+        string $contractGid,
+        int $cycleIndex,
+        ?array $cycle
+    ): void {
+        if (! $cycle) {
+            return;
+        }
+
+        $now = now('UTC');
+        $chargeWindowEnds = $now->copy()->addHours(24);
+        $expected = $this->parseCycleDate($cycle['billing_attempt_expected_date'] ?? null);
+
+        if ($expected && $expected->lte($chargeWindowEnds)) {
+            return;
+        }
+
+        $billingDate = $this->earliestChargeableDateInCycle($cycle, $now);
+
+        if (! $billingDate || $billingDate->gt($chargeWindowEnds)) {
+            return;
+        }
+
+        $this->rescheduleCycle(
+            $shop,
+            $contractGid,
+            $cycleIndex,
+            $billingDate->format('Y-m-d\TH:i:s\Z')
+        );
+    }
+
+    private function earliestChargeableDateInCycle(?array $cycle, Carbon $now): ?Carbon
+    {
+        if (! $cycle) {
+            return null;
+        }
+
+        $start = $this->parseCycleDate($cycle['cycle_start_at'] ?? null);
+        $end = $this->parseCycleDate($cycle['cycle_end_at'] ?? null);
+        $billingDate = $now->copy()->addMinute();
+
+        if ($start && $billingDate->lt($start)) {
+            $billingDate = $start->copy()->addMinute();
+        }
+
+        if ($end && $billingDate->gte($end)) {
+            $billingDate = $end->copy()->subMinute();
+        }
+
+        if ($start && $end && $billingDate->lt($start)) {
+            return null;
+        }
+
+        return $billingDate;
+    }
+
+    /**
+     * originTime must fall inside the cycle window. Prefer expected date so the
+     * attempt matches the selected cycle; Shopify still processes payment now.
+     */
+    private function resolveOriginTimeForCycle(?array $cycle): string
+    {
+        $expected = $this->parseCycleDate($cycle['billing_attempt_expected_date'] ?? null);
+        if ($expected) {
+            return $expected->format('Y-m-d\TH:i:s\Z');
+        }
+
+        $start = $this->parseCycleDate($cycle['cycle_start_at'] ?? null);
+        if ($start) {
+            return $start->copy()->addMinute()->format('Y-m-d\TH:i:s\Z');
+        }
+
+        return now('UTC')->format('Y-m-d\TH:i:s\Z');
+    }
+
+    private function parseCycleDate(mixed $value): ?Carbon
+    {
+        if (! is_string($value) || $value === '') {
+            return null;
+        }
+
+        try {
+            return Carbon::parse($value)->utc();
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function createCycleChargeAttempt(User $shop, string $contractGid, int $cycleIndex): array
+    {
         $mutation = <<<'GQL'
-        mutation subscriptionBillingAttemptCreate($contractId: ID!, $index: Int!, $idempotencyKey: String!) {
+        mutation subscriptionBillingCycleCharge($contractId: ID!, $index: Int!) {
+            subscriptionBillingCycleCharge(
+                subscriptionContractId: $contractId
+                billingCycleSelector: { index: $index }
+            ) {
+                subscriptionBillingAttempt {
+                    id
+                    ready
+                    errorMessage
+                    originTime
+                    order {
+                        id
+                        name
+                        displayFinancialStatus
+                    }
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $result = $this->graphql->mutationForShop($shop, 'subscriptionBillingCycleCharge', $mutation, [
+            'contractId' => $contractGid,
+            'index' => $cycleIndex,
+        ]);
+
+        return $result['subscriptionBillingAttempt'] ?? [];
+    }
+
+    private function createBillingAttemptForCycle(
+        User $shop,
+        string $contractGid,
+        int $cycleIndex,
+        string $originTime
+    ): array {
+        $mutation = <<<'GQL'
+        mutation subscriptionBillingAttemptCreate(
+            $contractId: ID!
+            $index: Int!
+            $idempotencyKey: String!
+            $originTime: DateTime!
+        ) {
             subscriptionBillingAttemptCreate(
                 subscriptionContractId: $contractId
                 subscriptionBillingAttemptInput: {
                     billingCycleSelector: { index: $index }
                     idempotencyKey: $idempotencyKey
+                    originTime: $originTime
                 }
             ) {
                 subscriptionBillingAttempt {
                     id
                     ready
                     errorMessage
+                    originTime
                     order {
                         id
                         name
@@ -1851,59 +2097,198 @@ class ShopifySubscriptionContractService
         $result = $this->graphql->mutationForShop($shop, 'subscriptionBillingAttemptCreate', $mutation, [
             'contractId' => $contractGid,
             'index' => $cycleIndex,
-            'idempotencyKey' => sprintf('charge-%d-%s', $cycleIndex, uniqid('', true)),
+            'idempotencyKey' => (string) Str::uuid(),
+            'originTime' => $originTime,
         ]);
 
-        $attempt = $result['subscriptionBillingAttempt'] ?? [];
+        return $result['subscriptionBillingAttempt'] ?? [];
+    }
 
-        /*
-        |--------------------------------------------------------------------------
-        | STEP 3 — Poll billing attempt until ready
-        |--------------------------------------------------------------------------
-        */
+    private function finalizeBillingAttempt(User $shop, array $attempt, int $cycleIndex): array
+    {
         $query = <<<'GQL'
         query GetBillingAttempt($id: ID!) {
             subscriptionBillingAttempt(id: $id) {
                 id
-                errorCode
+                ready
                 errorMessage
                 originTime
-                paymentGroupId
-                paymentSessionId
-                ready
-                respectInventoryPolicy
-                createdAt
-                completedAt
-                nextActionUrl
-                idempotencyKey
+                order {
+                    id
+                    name
+                    displayFinancialStatus
+                }
             }
         }
         GQL;
 
-        $attemptData = null;
+        $attemptData = $attempt;
 
-        for ($i = 0; $i < 5; $i++) {
-            sleep(2);
-            $attemptResponse = $this->graphql->mutationForShop($shop, 'subscriptionBillingAttempt', $query, [
-                'id' =>  $attempt['id'],
-            ]);
-            // $attemptResponse = $this->shop->api()->graph($query, ['id' => $attempt['id'] ?? null]);
-            $attemptData = $attemptResponse['body']['data']['subscriptionBillingAttempt'] ?? null;
+        if (! empty($attempt['id']) && empty($attempt['ready'])) {
+            for ($i = 0; $i < 5; $i++) {
+                sleep(2);
 
-            if ($attemptData && $attemptData['ready'] === true) {
-                break;
+                $attemptData = $this->graphql->mutationForShop(
+                    $shop,
+                    'subscriptionBillingAttempt',
+                    $query,
+                    ['id' => $attempt['id']]
+                );
+
+                if (($attemptData['ready'] ?? false) === true) {
+                    break;
+                }
             }
         }
 
-        dd($attemptResponse);
-
         return [
-            'id' => $attempt['id'] ?? null,
-            'ready' => $attempt['ready'] ?? null,
-            'error_message' => $attempt['errorMessage'] ?? null,
-            'order_name' => $attempt['order']['name'] ?? null,
-            'order_financial_status' => $attempt['order']['displayFinancialStatus'] ?? null,
+            'id' => $attemptData['id'] ?? ($attempt['id'] ?? null),
+            'ready' => $attemptData['ready'] ?? ($attempt['ready'] ?? null),
+            'error_message' => $attemptData['errorMessage'] ?? ($attempt['errorMessage'] ?? null),
+            'order_id' => $attemptData['order']['id'] ?? ($attempt['order']['id'] ?? null),
+            'order_name' => $attemptData['order']['name'] ?? ($attempt['order']['name'] ?? null),
+            'order_financial_status' => $attemptData['order']['displayFinancialStatus']
+                ?? ($attempt['order']['displayFinancialStatus'] ?? null),
+            'origin_time' => $attemptData['originTime'] ?? ($attempt['originTime'] ?? null),
+            'cycle_index' => $cycleIndex,
         ];
+    }
+
+    /**
+     * Mark SCHEDULED fulfillment orders as OPEN (same as Admin "Fulfill early").
+     */
+    private function openScheduledFulfillmentOrders(User $shop, string $orderGid): void
+    {
+        $query = <<<'GQL'
+        query OrderFulfillmentOrders($id: ID!) {
+            order(id: $id) {
+                fulfillmentOrders(first: 20) {
+                    edges {
+                        node {
+                            id
+                            status
+                            fulfillAt
+                        }
+                    }
+                }
+            }
+        }
+        GQL;
+
+        try {
+            $data = $this->graphql->executeForShop($shop, $query, ['id' => $orderGid]);
+        } catch (\Throwable $e) {
+            Log::warning('Unable to load fulfillment orders after charge', [
+                'order_id' => $orderGid,
+                'message' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        $edges = $data['order']['fulfillmentOrders']['edges'] ?? [];
+        $mutation = <<<'GQL'
+        mutation fulfillmentOrderOpen($id: ID!) {
+            fulfillmentOrderOpen(id: $id) {
+                fulfillmentOrder {
+                    id
+                    status
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        foreach ($edges as $edge) {
+            $fo = $edge['node'] ?? [];
+            $foId = $fo['id'] ?? null;
+            $status = strtoupper((string) ($fo['status'] ?? ''));
+
+            if (! $foId || $status !== 'SCHEDULED') {
+                continue;
+            }
+
+            try {
+                $this->graphql->mutationForShop($shop, 'fulfillmentOrderOpen', $mutation, [
+                    'id' => $foId,
+                ]);
+            } catch (\Throwable $e) {
+                Log::warning('Unable to open scheduled fulfillment order after charge', [
+                    'order_id' => $orderGid,
+                    'fulfillment_order_id' => $foId,
+                    'message' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
+    public function fetchBillingCycleByIndex(User $shop, string $contractGid, int $cycleIndex): ?array
+    {
+        $query = <<<'GQL'
+        query subscriptionBillingCycle($contractId: ID!, $index: Int!) {
+            subscriptionBillingCycle(
+                billingCycleInput: {
+                    contractId: $contractId
+                    selector: { index: $index }
+                }
+            ) {
+                cycleIndex
+                skipped
+                status
+                billingAttemptExpectedDate
+                cycleStartAt
+                cycleEndAt
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query, [
+            'contractId' => $contractGid,
+            'index' => $cycleIndex,
+        ]);
+
+        return $this->normalizeBillingCycle($data['subscriptionBillingCycle'] ?? []);
+    }
+
+    /**
+     * Find the next chargeable cycle after $afterCycleIndex and return its expected billing date.
+     */
+    public function resolveNextBillingDateAfterCycle(
+        User $shop,
+        string $contractGid,
+        int $afterCycleIndex
+    ): ?string {
+        $maxLookahead = 12;
+
+        for ($offset = 1; $offset <= $maxLookahead; $offset++) {
+            $cycle = $this->fetchBillingCycleByIndex($shop, $contractGid, $afterCycleIndex + $offset);
+
+            if (! $cycle) {
+                continue;
+            }
+
+            if (! empty($cycle['skipped'])) {
+                continue;
+            }
+
+            $status = strtoupper((string) ($cycle['status'] ?? ''));
+            if ($status === 'BILLED') {
+                continue;
+            }
+
+            $expected = $cycle['billing_attempt_expected_date'] ?? null;
+
+            if (is_string($expected) && $expected !== '') {
+                return $expected;
+            }
+        }
+
+        $contract = $this->fetchContract($shop, $contractGid);
+
+        return $contract['nextBillingDate'] ?? null;
     }
 
     public function skipCycle(User $shop, string $contractGid, int $cycleIndex): array

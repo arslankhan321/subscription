@@ -19,6 +19,7 @@ class SubscriptionProduct extends Model
         'sku',
         'quantity',
         'current_price',
+        'base_price',
         'currency_code',
         'image_url',
         'requires_shipping',
@@ -28,6 +29,7 @@ class SubscriptionProduct extends Model
     {
         return [
             'current_price' => 'decimal:2',
+            'base_price' => 'decimal:2',
             'requires_shipping' => 'boolean',
         ];
     }
