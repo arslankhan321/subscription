@@ -319,6 +319,186 @@ class SubscriptionService
         return $result;
     }
 
+    public function fulfillments(int $id): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+        $subscription->loadMissing('recurringOrders');
+
+        $orderGids = [];
+
+        if ($subscription->shopify_origin_order_gid) {
+            $orderGids[] = $subscription->shopify_origin_order_gid;
+        } elseif ($subscription->shopify_origin_order_id) {
+            $orderGids[] = 'gid://shopify/Order/'.$subscription->shopify_origin_order_id;
+        } else {
+            try {
+                $contract = $this->shopifySubscriptionContractService->fetchContract(
+                    $shop,
+                    $subscription->shopify_gid
+                );
+                $originGid = $contract['originOrder']['id'] ?? null;
+
+                if (is_string($originGid) && $originGid !== '') {
+                    $orderGids[] = $originGid;
+                    $subscription->forceFill([
+                        'shopify_origin_order_gid' => $originGid,
+                        'shopify_origin_order_id' => isset($contract['originOrder']['legacyResourceId'])
+                            ? (int) $contract['originOrder']['legacyResourceId']
+                            : $subscription->shopify_origin_order_id,
+                    ])->save();
+                }
+            } catch (\Throwable $exception) {
+                \Illuminate\Support\Facades\Log::warning('Unable to resolve prepaid origin order for fulfillments', [
+                    'subscription_id' => $subscription->id,
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
+
+        foreach ($subscription->recurringOrders as $order) {
+            if (! empty($order->shopify_gid)) {
+                $orderGids[] = $order->shopify_gid;
+            } elseif (! empty($order->shopify_order_id)) {
+                $orderGids[] = 'gid://shopify/Order/'.$order->shopify_order_id;
+            }
+        }
+
+        if ($orderGids === []) {
+            return [
+                'summary' => [
+                    'total' => 0,
+                    'fulfilled' => 0,
+                    'pending' => 0,
+                    'next_fulfillment' => null,
+                    'progress' => 0,
+                ],
+                'fulfillments' => [],
+            ];
+        }
+
+        return $this->shopifySubscriptionContractService->fetchPrepaidFulfillments($shop, $orderGids);
+    }
+
+    public function rescheduleFulfillment(int $id, string $fulfillmentOrderId, string $fulfillAt): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $result = $this->shopifySubscriptionContractService->rescheduleFulfillmentOrder(
+            $shop,
+            $fulfillmentOrderId,
+            $fulfillAt
+        );
+
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_RESCHEDULED,
+            'Merchant rescheduled a prepaid fulfillment.',
+            [
+                'fulfillment_order_id' => $fulfillmentOrderId,
+                'fulfill_at' => $fulfillAt,
+            ]
+        );
+
+        return $result;
+    }
+
+    public function skipFulfillment(int $id, string $fulfillmentOrderId): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $payload = $this->fulfillments($id);
+        $target = collect($payload['fulfillments'] ?? [])
+            ->first(fn (array $fo) => ($fo['id'] ?? null) === $fulfillmentOrderId);
+
+        if (! $target) {
+            throw new ShopifySellingPlanException('Fulfillment order not found on this subscription.');
+        }
+
+        $interval = strtoupper((string) ($subscription->delivery_interval ?? 'MONTH'));
+        $count = max(1, (int) ($subscription->delivery_interval_count ?? 1));
+        $base = ! empty($target['fulfill_at'])
+            ? Carbon::parse($target['fulfill_at'])->utc()
+            : now('UTC');
+
+        $newDate = match ($interval) {
+            'DAY' => $base->copy()->addDays($count),
+            'WEEK' => $base->copy()->addWeeks($count),
+            'YEAR' => $base->copy()->addYears($count),
+            default => $base->copy()->addMonths($count),
+        };
+
+        $fulfillAt = $newDate->format('Y-m-d\TH:i:s\Z');
+
+        $result = $this->shopifySubscriptionContractService->rescheduleFulfillmentOrder(
+            $shop,
+            $fulfillmentOrderId,
+            $fulfillAt
+        );
+
+        try {
+            $this->shopifySubscriptionContractService->setContractNextBillingDate(
+                $shop,
+                $subscription->shopify_gid,
+                $fulfillAt
+            );
+            $subscription->forceFill(['next_billing_date' => $newDate])->save();
+        } catch (\Throwable $exception) {
+            \Illuminate\Support\Facades\Log::warning('Unable to bump next billing date after fulfillment skip', [
+                'subscription_id' => $subscription->id,
+                'message' => $exception->getMessage(),
+            ]);
+        }
+
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_SKIPPED,
+            'Merchant skipped a prepaid fulfillment.',
+            [
+                'fulfillment_order_id' => $fulfillmentOrderId,
+                'fulfill_at' => $fulfillAt,
+            ]
+        );
+
+        return $result;
+    }
+
+    public function refundFulfillment(int $id, string $fulfillmentOrderId): array
+    {
+        [$shop, $subscription] = $this->shopAndSubscription($id);
+
+        $payload = $this->fulfillments($id);
+        $target = collect($payload['fulfillments'] ?? [])
+            ->first(fn (array $fo) => ($fo['id'] ?? null) === $fulfillmentOrderId);
+
+        if (! $target) {
+            throw new ShopifySellingPlanException('Fulfillment order not found on this subscription.');
+        }
+
+        $orderGid = $target['order_id'] ?? $subscription->shopify_origin_order_gid;
+
+        if (! $orderGid) {
+            throw new ShopifySellingPlanException('Origin order is missing for this prepaid subscription.');
+        }
+
+        $result = $this->shopifySubscriptionContractService->refundFulfillmentOrder(
+            $shop,
+            $orderGid,
+            $target
+        );
+
+        $this->activityLogService->logMerchant(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_UPDATED,
+            'Merchant refunded a prepaid fulfillment.',
+            [
+                'fulfillment_order_id' => $fulfillmentOrderId,
+                'refund_id' => $result['id'] ?? null,
+            ]
+        );
+
+        return $result;
+    }
+
     public function addDiscount(int $id, array $input): array
     {
         [$shop, $subscription] = $this->shopAndSubscription($id);

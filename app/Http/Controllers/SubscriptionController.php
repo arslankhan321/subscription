@@ -233,6 +233,81 @@ class SubscriptionController extends Controller
         }
     }
 
+    public function fulfillments(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'data' => $this->service->fulfillments($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function rescheduleFulfillment(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'fulfillment_order_id' => ['required', 'string'],
+            'fulfill_at' => ['required', 'date'],
+        ]);
+
+        try {
+            $fulfillAt = \Carbon\Carbon::parse($validated['fulfill_at'])
+                ->utc()
+                ->format('Y-m-d\TH:i:s\Z');
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Fulfillment rescheduled.',
+                'data' => $this->service->rescheduleFulfillment(
+                    $id,
+                    $validated['fulfillment_order_id'],
+                    $fulfillAt
+                ),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function skipFulfillment(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'fulfillment_order_id' => ['required', 'string'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Fulfillment skipped.',
+                'data' => $this->service->skipFulfillment($id, $validated['fulfillment_order_id']),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function refundFulfillment(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'fulfillment_order_id' => ['required', 'string'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Fulfillment refunded.',
+                'data' => $this->service->refundFulfillment($id, $validated['fulfillment_order_id']),
+            ]);
+        } catch (ShopifySellingPlanException|\RuntimeException $exception) {
+            return response()->json([
+                'success' => false,
+                'message' => $exception->getMessage(),
+            ], 422);
+        }
+    }
+
     public function addDiscount(int $id, Request $request)
     {
         $validated = $request->validate([

@@ -60,6 +60,29 @@ export const rescheduleSubscriptionCycle = (id, cycleIndex, billingDate) => {
     });
 };
 
+export const getSubscriptionFulfillments = (id) => {
+    return api.get(`selling/subscriptions/${id}/fulfillments`);
+};
+
+export const rescheduleSubscriptionFulfillment = (id, fulfillmentOrderId, fulfillAt) => {
+    return api.post(`selling/subscriptions/${id}/fulfillments/reschedule`, {
+        fulfillment_order_id: fulfillmentOrderId,
+        fulfill_at: fulfillAt,
+    });
+};
+
+export const skipSubscriptionFulfillment = (id, fulfillmentOrderId) => {
+    return api.post(`selling/subscriptions/${id}/fulfillments/skip`, {
+        fulfillment_order_id: fulfillmentOrderId,
+    });
+};
+
+export const refundSubscriptionFulfillment = (id, fulfillmentOrderId) => {
+    return api.post(`selling/subscriptions/${id}/fulfillments/refund`, {
+        fulfillment_order_id: fulfillmentOrderId,
+    });
+};
+
 export const addSubscriptionDiscount = (id, payload) => {
     return api.post(`selling/subscriptions/${id}/discounts`, payload);
 };

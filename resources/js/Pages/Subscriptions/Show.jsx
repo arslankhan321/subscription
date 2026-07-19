@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSubscriptionDetail } from "@/hooks/subscriptions/useSubscriptionDetail";
 import { useBillingCycles } from "@/hooks/subscriptions/useBillingCycles";
+import { useFulfillments } from "@/hooks/subscriptions/useFulfillments";
 import { useAddDiscountModal } from "@/Components/Subscriptions/AddDiscountModal";
 import { useCancelSubscriptionModal } from "@/Components/Subscriptions/CancelSubscriptionModal";
 import { CustomerCard } from "@/Components/Subscriptions/CustomerCard";
+import { FulfillmentCard } from "@/Components/Subscriptions/FulfillmentCard";
 import { PlanSubscriptionPricing } from "@/Components/Subscriptions/PlanSubscriptionPricing";
 import SubscriptionActivityLog from "@/Components/Subscriptions/SubscriptionActivityLog";
 import {
@@ -381,6 +383,23 @@ export default function SubscriptionShow() {
         onActionComplete: () => refetch({ silent: true }),
     });
 
+    const isPrepaid =
+        detectBillingType(subscription) === BILLING_TYPES.PREPAID;
+
+    const {
+        summary: fulfillmentSummary,
+        fulfillments,
+        loading: fulfillmentLoading,
+        actionLoading: fulfillmentActionLoading,
+        error: fulfillmentError,
+        rescheduleFulfillment,
+        skipFulfillment,
+        refundFulfillment,
+    } = useFulfillments(id, {
+        enabled: Boolean(id) && isPrepaid,
+        onActionComplete: () => refetch({ silent: true }),
+    });
+
     const { open: openDiscountModal, modal: discountModal } = useAddDiscountModal({
         subscriptionId: id,
         products: subscription?.products ?? [],
@@ -421,8 +440,6 @@ export default function SubscriptionShow() {
     const actionsBusy = Boolean(statusAction) || cancelling;
     const billingActionsDisabled =
         status === "paused" || status === "cancelled" || status === "expired";
-    const isPrepaid =
-        detectBillingType(subscription) === BILLING_TYPES.PREPAID;
 
     const handleStatusAction = async (action) => {
         if (!id || statusAction || action === "cancel") {
@@ -869,6 +886,20 @@ export default function SubscriptionShow() {
                             onUnskip={unskipCycle}
                             onReschedule={rescheduleCycle}
                         />
+
+                        {isPrepaid && (
+                            <FulfillmentCard
+                                summary={fulfillmentSummary}
+                                fulfillments={fulfillments}
+                                loading={fulfillmentLoading}
+                                actionLoading={fulfillmentActionLoading}
+                                error={fulfillmentError}
+                                actionsDisabled={billingActionsDisabled}
+                                onReschedule={rescheduleFulfillment}
+                                onSkip={skipFulfillment}
+                                onRefund={refundFulfillment}
+                            />
+                        )}
 
                         <SubscriptionActivityLog logs={subscription.activity_logs ?? []} />
 

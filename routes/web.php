@@ -118,6 +118,14 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
             ->name('selling.subscriptions.cycles.unskip');
         Route::post('subscriptions/{id}/cycles/{cycleIndex}/reschedule', [SubscriptionController::class, 'rescheduleCycle'])
             ->name('selling.subscriptions.cycles.reschedule');
+        Route::get('subscriptions/{id}/fulfillments', [SubscriptionController::class, 'fulfillments'])
+            ->name('selling.subscriptions.fulfillments');
+        Route::post('subscriptions/{id}/fulfillments/reschedule', [SubscriptionController::class, 'rescheduleFulfillment'])
+            ->name('selling.subscriptions.fulfillments.reschedule');
+        Route::post('subscriptions/{id}/fulfillments/skip', [SubscriptionController::class, 'skipFulfillment'])
+            ->name('selling.subscriptions.fulfillments.skip');
+        Route::post('subscriptions/{id}/fulfillments/refund', [SubscriptionController::class, 'refundFulfillment'])
+            ->name('selling.subscriptions.fulfillments.refund');
         Route::post('subscriptions/{id}/discounts', [SubscriptionController::class, 'addDiscount'])
             ->name('selling.subscriptions.discounts.store');
         Route::post('subscriptions/{id}/discounts/remove', [SubscriptionController::class, 'removeDiscount'])

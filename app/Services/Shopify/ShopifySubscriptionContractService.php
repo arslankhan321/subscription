@@ -2408,4 +2408,346 @@ class ShopifySubscriptionContractService
             ] : null,
         ];
     }
+
+    /**
+     * Prepaid origin order → scheduled / open fulfillment orders (process deliveries).
+     *
+     * @param  list<string>  $orderGids
+     */
+    public function fetchPrepaidFulfillments(User $shop, array $orderGids): array
+    {
+        $fulfillments = [];
+
+        foreach (array_values(array_unique(array_filter($orderGids))) as $orderGid) {
+            $query = <<<'GQL'
+            query OrderFulfillmentOrders($id: ID!) {
+                order(id: $id) {
+                    id
+                    name
+                    fulfillmentOrders(first: 50) {
+                        edges {
+                            node {
+                                id
+                                status
+                                fulfillAt
+                                assignedLocation {
+                                    location {
+                                        id
+                                    }
+                                }
+                                destination {
+                                    firstName
+                                    lastName
+                                    address1
+                                    address2
+                                    city
+                                    province
+                                    zip
+                                    countryCode
+                                }
+                                lineItems(first: 25) {
+                                    edges {
+                                        node {
+                                            id
+                                            totalQuantity
+                                            remainingQuantity
+                                            lineItem {
+                                                id
+                                                name
+                                                variantTitle
+                                                sku
+                                            }
+                                        }
+                                    }
+                                }
+                                fulfillments(first: 5) {
+                                    edges {
+                                        node {
+                                            id
+                                            status
+                                            trackingInfo {
+                                                company
+                                                number
+                                                url
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            GQL;
+
+            $data = $this->graphql->executeForShop($shop, $query, ['id' => $orderGid]);
+            $order = $data['order'] ?? null;
+
+            if (! is_array($order) || empty($order['id'])) {
+                continue;
+            }
+
+            foreach ($order['fulfillmentOrders']['edges'] ?? [] as $edge) {
+                $node = $edge['node'] ?? null;
+
+                if (! is_array($node) || empty($node['id'])) {
+                    continue;
+                }
+
+                $fulfillments[] = $this->normalizeFulfillmentOrder($node, $order);
+            }
+        }
+
+        usort($fulfillments, function (array $a, array $b) {
+            $aTime = $a['fulfill_at'] ? strtotime($a['fulfill_at']) : PHP_INT_MAX;
+            $bTime = $b['fulfill_at'] ? strtotime($b['fulfill_at']) : PHP_INT_MAX;
+
+            return $aTime <=> $bTime;
+        });
+
+        $fulfilled = 0;
+        $pending = 0;
+        $nextFulfillment = null;
+
+        foreach ($fulfillments as $fo) {
+            $bucket = $fo['status_bucket'];
+
+            if ($bucket === 'fulfilled') {
+                $fulfilled++;
+            } elseif (in_array($bucket, ['unfulfilled', 'scheduled', 'in_progress'], true)) {
+                $pending++;
+
+                if ($nextFulfillment === null && ! empty($fo['fulfill_at'])) {
+                    $nextFulfillment = $fo['fulfill_at'];
+                }
+            }
+        }
+
+        $total = count($fulfillments);
+        $progress = $total > 0 ? (int) round(($fulfilled / $total) * 100) : 0;
+
+        return [
+            'summary' => [
+                'total' => $total,
+                'fulfilled' => $fulfilled,
+                'pending' => $pending,
+                'next_fulfillment' => $nextFulfillment,
+                'progress' => $progress,
+            ],
+            'fulfillments' => $fulfillments,
+        ];
+    }
+
+    public function rescheduleFulfillmentOrder(User $shop, string $fulfillmentOrderGid, string $fulfillAt): array
+    {
+        $mutation = <<<'GQL'
+        mutation fulfillmentOrderReschedule($id: ID!, $fulfillAt: DateTime!) {
+            fulfillmentOrderReschedule(id: $id, fulfillAt: $fulfillAt) {
+                fulfillmentOrder {
+                    id
+                    status
+                    fulfillAt
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $result = $this->graphql->mutationForShop($shop, 'fulfillmentOrderReschedule', $mutation, [
+            'id' => $fulfillmentOrderGid,
+            'fulfillAt' => $fulfillAt,
+        ]);
+
+        $fo = $result['fulfillmentOrder'] ?? [];
+
+        return [
+            'id' => $fo['id'] ?? $fulfillmentOrderGid,
+            'status' => $fo['status'] ?? null,
+            'fulfill_at' => $fo['fulfillAt'] ?? $fulfillAt,
+        ];
+    }
+
+    public function setContractNextBillingDate(User $shop, string $contractGid, string $date): array
+    {
+        $mutation = <<<'GQL'
+        mutation subscriptionContractSetNextBillingDate($contractId: ID!, $date: DateTime!) {
+            subscriptionContractSetNextBillingDate(contractId: $contractId, date: $date) {
+                contract {
+                    id
+                    nextBillingDate
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $result = $this->graphql->mutationForShop($shop, 'subscriptionContractSetNextBillingDate', $mutation, [
+            'contractId' => $contractGid,
+            'date' => $date,
+        ]);
+
+        return [
+            'id' => $result['contract']['id'] ?? $contractGid,
+            'next_billing_date' => $result['contract']['nextBillingDate'] ?? $date,
+        ];
+    }
+
+    /**
+     * Refund one prepaid fulfillment cycle (quantity 1 per FO line item).
+     */
+    public function refundFulfillmentOrder(User $shop, string $orderGid, array $fulfillmentOrder): array
+    {
+        $locationId = $fulfillmentOrder['location_id'] ?? null;
+        $refundLineItems = [];
+
+        foreach ($fulfillmentOrder['line_items'] ?? [] as $line) {
+            $lineItemId = $line['line_item_id'] ?? null;
+            $qty = max(1, (int) ($line['remaining_quantity'] ?? $line['quantity'] ?? 1));
+
+            if (! $lineItemId) {
+                continue;
+            }
+
+            $item = [
+                'lineItemId' => $lineItemId,
+                'quantity' => $qty,
+                'restockType' => 'CANCEL',
+            ];
+
+            if ($locationId) {
+                $item['locationId'] = $locationId;
+            }
+
+            $refundLineItems[] = $item;
+        }
+
+        if ($refundLineItems === []) {
+            throw new \RuntimeException('No refundable line items on this fulfillment order.');
+        }
+
+        $mutation = <<<'GQL'
+        mutation refundCreate($input: RefundInput!) {
+            refundCreate(input: $input) {
+                refund {
+                    id
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $result = $this->graphql->mutationForShop($shop, 'refundCreate', $mutation, [
+            'input' => [
+                'orderId' => $orderGid,
+                'refundLineItems' => $refundLineItems,
+                'notify' => true,
+            ],
+        ]);
+
+        return [
+            'id' => $result['refund']['id'] ?? null,
+        ];
+    }
+
+    private function normalizeFulfillmentOrder(array $node, array $order): array
+    {
+        $status = strtoupper((string) ($node['status'] ?? ''));
+        $bucket = match ($status) {
+            'CLOSED', 'FULFILLED' => 'fulfilled',
+            'CANCELLED' => 'cancelled',
+            'IN_PROGRESS', 'INCOMPLETE' => 'in_progress',
+            'SCHEDULED' => 'scheduled',
+            default => 'unfulfilled', // OPEN and others
+        };
+
+        $displayStatus = match ($bucket) {
+            'fulfilled' => 'Fulfilled',
+            'cancelled' => 'Cancelled',
+            'in_progress' => 'In progress',
+            'scheduled' => 'Scheduled',
+            default => 'Unfulfilled',
+        };
+
+        $lineItems = [];
+
+        foreach ($node['lineItems']['edges'] ?? [] as $edge) {
+            $li = $edge['node'] ?? [];
+            $product = $li['lineItem'] ?? [];
+            $name = (string) ($product['name'] ?? 'Item');
+            $variant = trim((string) ($product['variantTitle'] ?? ''));
+
+            if ($variant !== '' && $variant !== 'Default Title' && ! str_contains($name, $variant)) {
+                $name .= " ({$variant})";
+            }
+
+            $lineItems[] = [
+                'id' => $li['id'] ?? null,
+                'line_item_id' => $product['id'] ?? null,
+                'name' => $name,
+                'sku' => $product['sku'] ?? null,
+                'quantity' => (int) ($li['totalQuantity'] ?? 0),
+                'remaining_quantity' => (int) ($li['remainingQuantity'] ?? $li['totalQuantity'] ?? 0),
+            ];
+        }
+
+        $destination = $node['destination'] ?? [];
+        $destinationParts = array_values(array_filter([
+            trim(implode(' ', array_filter([
+                $destination['firstName'] ?? null,
+                $destination['lastName'] ?? null,
+            ]))),
+            $destination['address1'] ?? null,
+            $destination['address2'] ?? null,
+            trim(implode(' ', array_filter([
+                $destination['city'] ?? null,
+                $destination['province'] ?? null,
+                $destination['zip'] ?? null,
+            ]))),
+        ]));
+
+        $tracking = null;
+
+        foreach ($node['fulfillments']['edges'] ?? [] as $fulfillmentEdge) {
+            $fulfillment = $fulfillmentEdge['node'] ?? [];
+
+            foreach ($fulfillment['trackingInfo'] ?? [] as $info) {
+                $number = $info['number'] ?? null;
+
+                if ($number) {
+                    $tracking = [
+                        'number' => $number,
+                        'url' => $info['url'] ?? null,
+                        'company' => $info['company'] ?? null,
+                    ];
+                    break 2;
+                }
+            }
+        }
+
+        return [
+            'id' => $node['id'],
+            'order_id' => $order['id'] ?? null,
+            'order_name' => $order['name'] ?? null,
+            'status' => $status,
+            'status_bucket' => $bucket,
+            'display_status' => $displayStatus,
+            'fulfill_at' => $node['fulfillAt'] ?? null,
+            'location_id' => $node['assignedLocation']['location']['id'] ?? null,
+            'destination' => $destinationParts !== [] ? implode(', ', $destinationParts) : null,
+            'line_items' => $lineItems,
+            'tracking' => $tracking,
+            'can_reschedule' => $status === 'SCHEDULED',
+            'can_skip' => $status === 'SCHEDULED',
+            'can_refund' => $status === 'SCHEDULED',
+        ];
+    }
 }
