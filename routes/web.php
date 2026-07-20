@@ -157,3 +157,6 @@ Route::get('storefront/widget.css', [SubscriptionWidgetController::class, 'store
     ->name('storefront.widget.css');
 Route::get('storefront/widgets/{name}', [SubscriptionWidgetController::class, 'storefront'])
     ->name('storefront.widgets.show');
+Route::get('storefront/products/{productId}/plan', [SubscriptionWidgetController::class, 'storefrontProductPlan'])
+    ->name('storefront.products.plan')
+    ->where('productId', '[0-9]+');

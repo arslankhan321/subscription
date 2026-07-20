@@ -129,4 +129,26 @@ class SubscriptionWidgetController extends Controller
             'Cache-Control' => 'public, max-age=3600',
         ]);
     }
+
+    public function storefrontProductPlan(Request $request, string $productId)
+    {
+        /** @var \App\Services\SubscriptionPlanService $planService */
+        $planService = app(\App\Services\SubscriptionPlanService::class);
+
+        $shopId = $planService->resolveShopIdFromStorefrontRequest($request);
+
+        if (! $shopId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Shop not found. Pass ?shop=your-store.myshopify.com',
+            ], 404)->header('Access-Control-Allow-Origin', '*');
+        }
+
+        $payload = $planService->storefrontPlanForProduct($shopId, $productId);
+
+        return response()->json([
+            'success' => true,
+            'data' => $payload,
+        ])->header('Access-Control-Allow-Origin', '*');
+    }
 }

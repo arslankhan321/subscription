@@ -1,8 +1,9 @@
 {% comment %}
   Subscribify — PDP purchase options widget.
 
-  Strategy: block other apps' selling plan groups (non-blank app_id != subscribify).
-  Keep Subscribify groups + any legacy untagged groups.
+  Always mounts when a product is present so recurring_invoice (DB-only) plans
+  can load via the storefront API. Selling plan JSON is included when groups exist
+  (auto_charge). Strategy: block other apps' selling plan groups.
 {% endcomment %}
 
 {% liquid
@@ -12,11 +13,17 @@
   endif
 
   assign app_base = block.settings.app_url | strip
-  if app_base == blank
+  comment
+    Prefer Shopify App Proxy so tunnel URL changes never break the storefront.
+    Theme editor may still have an old trycloudflare.com value saved from a previous default —
+    ignore those and use the proxy.
+  endcomment
+  if app_base == blank or app_base contains 'trycloudflare.com'
     assign app_base = shop.url | append: '/apps/subscribify'
   endif
 
   assign widget_name = block.settings.widget_name | strip
+  assign shop_domain = shop.permanent_domain
 
   assign blocked_group_ids = ','
   assign has_any_group = false
@@ -31,12 +38,13 @@
   endif
 %}
 
-{% if widget_product != blank and has_any_group %}
+{% if widget_product != blank %}
   <script type="application/json" id="subscription-widget-data">
-{"productId":{{ widget_product.id | json }},"selectedVariantId":{{ widget_product.selected_or_first_available_variant.id | json }},"appId":"subscribify","variants":{
+{"productId":{{ widget_product.id | json }},"selectedVariantId":{{ widget_product.selected_or_first_available_variant.id | json }},"appId":"subscribify","shop":{{ shop_domain | json }},"variants":{
 {%- for variant in widget_product.variants -%}
 {%- assign alloc_first = true -%}
 "{{ variant.id }}":{"price":{{ variant.price | json }},"compareAtPrice":{{ variant.compare_at_price | json }},"allocations":[
+{%- if has_any_group -%}
 {%- for allocation in variant.selling_plan_allocations -%}
 {%- assign gid = allocation.selling_plan_group.id | default: allocation.selling_plan_group_id -%}
 {%- assign needle = ',' | append: gid | append: ',' -%}
@@ -58,6 +66,7 @@
 ]}
 {%- endif -%}
 {%- endfor -%}
+{%- endif -%}
 ]}{%- unless forloop.last -%},{%- endunless -%}
 {%- endfor -%}
 }}
@@ -67,10 +76,11 @@
     id="subscription-widget"
     data-app-url="{{ app_base | escape }}"
     data-widget-name="{{ widget_name | escape }}"
+    data-shop="{{ shop_domain | escape }}"
     {{ block.shopify_attributes }}
   ></div>
 
-  <script src="{{ app_base }}/subscription-widget.js?v=7" defer></script>
+  <script src="{{ app_base }}/subscription-widget.js?v=13" defer></script>
 {% endif %}
 
 {% schema %}
@@ -88,9 +98,8 @@
     {
       "type": "text",
       "id": "app_url",
-      "label": "App / proxy URL",
-      "info": "Default Cloudflare tunnel or leave blank to use Shopify app proxy (/apps/subscribify).",
-      "default": "https://connectors-specialties-apt-agriculture.trycloudflare.com"
+      "label": "App / proxy URL (optional)",
+      "info": "Leave blank to use Shopify app proxy (/apps/subscribify). Only set this for local debugging — do not paste temporary Cloudflare tunnel URLs."
     },
     {
       "type": "text",

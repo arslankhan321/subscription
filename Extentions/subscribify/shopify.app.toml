@@ -2,7 +2,7 @@
 
 client_id = "a6444af8f1f7bd85047bfcdf2ddb0a16"
 name = "Subscribify"
-application_url = "https://connectors-specialties-apt-agriculture.trycloudflare.com"
+application_url = "https://hazards-nil-seventh-bye.trycloudflare.com"
 embedded = true
 
 [build]
@@ -19,10 +19,10 @@ use_legacy_install_flow = true
 
 [auth]
 redirect_urls = [
-  "https://connectors-specialties-apt-agriculture.trycloudflare.com/authenticate"
+  "https://hazards-nil-seventh-bye.trycloudflare.com/authenticate"
 ]
 
 [app_proxy]
-url = "https://connectors-specialties-apt-agriculture.trycloudflare.com"
+url = "https://hazards-nil-seventh-bye.trycloudflare.com"
 subpath = "subscribify"
 prefix = "apps"

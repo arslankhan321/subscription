@@ -92,6 +92,170 @@ class SubscriptionPlanService
         return $this->repository->find($id, $this->shopId());
     }
 
+    /**
+     * Storefront PDP lookup: which plan applies to this Shopify product.
+     *
+     * Prefers auto_charge when the product is on both plan types; otherwise
+     * returns recurring_invoice when that is the only match.
+     */
+    public function storefrontPlanForProduct(int $shopId, int|string $shopifyProductId): array
+    {
+        $productIds = $this->normalizeShopifyProductIds($shopifyProductId);
+
+        $autoChargeExists = SubscriptionPlan::query()
+            ->where('shop_id', $shopId)
+            ->where('plan_type', 'auto_charge')
+            ->where('status', 'active')
+            ->where('published', true)
+            ->whereHas('products', fn ($q) => $q->whereIn('shopify_product_id', $productIds))
+            ->exists();
+
+        if ($autoChargeExists) {
+            return ['plan_type' => 'auto_charge'];
+        }
+
+        $invoicePlan = SubscriptionPlan::query()
+            ->where('shop_id', $shopId)
+            ->where('plan_type', 'recurring_invoice')
+            ->where('status', 'active')
+            ->where('published', true)
+            ->whereHas('products', fn ($q) => $q->whereIn('shopify_product_id', $productIds))
+            ->with([
+                'products',
+                'options' => fn ($q) => $q->orderBy('position')->orderBy('id'),
+            ])
+            ->latest('id')
+            ->first();
+
+        if ($invoicePlan) {
+            $matchedProducts = $invoicePlan->products
+                ->filter(fn ($product) => in_array((string) $product->shopify_product_id, $productIds, true));
+
+            $variantIds = [];
+            foreach ($matchedProducts as $product) {
+                foreach ($this->normalizeShopifyVariantIds($product->shopify_variant_id) as $variantId) {
+                    $variantIds[] = $variantId;
+                }
+            }
+            $variantIds = array_values(array_unique(array_filter($variantIds)));
+
+            $giveDiscount = $invoicePlan->options->contains(
+                fn ($option) => (bool) ($option->give_discount ?? false)
+            );
+
+            $discountOption = $invoicePlan->options->first(
+                fn ($option) => (bool) ($option->give_discount ?? false)
+            );
+
+            return [
+                'plan_type' => 'recurring_invoice',
+                'plan_id' => $invoicePlan->id,
+                'plan_name' => $invoicePlan->name,
+                'variant_ids' => $variantIds,
+                'give_discount' => $giveDiscount,
+                'discount_description' => $giveDiscount
+                    ? $invoicePlan->discount_description
+                    : null,
+                'discount_amount' => $giveDiscount && $discountOption?->discount_amount !== null
+                    ? (float) $discountOption->discount_amount
+                    : null,
+                'discount_type' => $giveDiscount ? ($discountOption?->discount_type ?? null) : null,
+                'options' => $invoicePlan->options->map(function ($option) {
+                    $frequency = (int) ($option->delivery_frequency ?? 1);
+                    $interval = (string) ($option->delivery_interval ?? 'days');
+                    $label = trim((string) ($option->name ?: "{$frequency} {$interval}"));
+
+                    return [
+                        'id' => $option->id,
+                        'label' => $label,
+                        'delivery_frequency' => $frequency,
+                        'delivery_interval' => $interval,
+                        'give_discount' => (bool) ($option->give_discount ?? false),
+                        'discount_amount' => $option->discount_amount !== null
+                            ? (float) $option->discount_amount
+                            : null,
+                        'discount_type' => $option->discount_type,
+                    ];
+                })->values()->all(),
+            ];
+        }
+
+        return ['plan_type' => null];
+    }
+
+    /**
+     * Match both numeric Liquid IDs and Admin API GIDs stored on plan products.
+     *
+     * @return list<string>
+     */
+    private function normalizeShopifyProductIds(int|string $shopifyProductId): array
+    {
+        return $this->normalizeShopifyResourceIds($shopifyProductId, 'Product');
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function normalizeShopifyVariantIds(int|string|null $shopifyVariantId): array
+    {
+        if ($shopifyVariantId === null || trim((string) $shopifyVariantId) === '') {
+            return [];
+        }
+
+        return $this->normalizeShopifyResourceIds($shopifyVariantId, 'ProductVariant');
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function normalizeShopifyResourceIds(int|string $resourceId, string $resourceType): array
+    {
+        $raw = trim((string) $resourceId);
+        $numeric = $raw;
+
+        if (str_contains($raw, 'gid://')) {
+            $numeric = (string) (int) basename($raw);
+        } else {
+            $numeric = (string) (int) preg_replace('/\D+/', '', $raw);
+        }
+
+        return array_values(array_unique(array_filter([
+            $raw,
+            $numeric,
+            $numeric !== '' && $numeric !== '0' ? "gid://shopify/{$resourceType}/{$numeric}" : null,
+        ])));
+    }
+
+    public function resolveShopIdFromStorefrontRequest(\Illuminate\Http\Request $request): ?int
+    {
+        $shopDomain = $request->query('shop')
+            ?: $request->header('X-Shopify-Shop-Domain')
+            ?: $request->query('shop_domain');
+
+        if (! is_string($shopDomain) || trim($shopDomain) === '') {
+            return null;
+        }
+
+        $shopDomain = strtolower(trim($shopDomain));
+        $shopDomain = preg_replace('#^https?://#', '', $shopDomain);
+        $shopDomain = rtrim($shopDomain, '/');
+
+        if (! str_contains($shopDomain, '.')) {
+            $shopDomain .= '.myshopify.com';
+        }
+
+        $short = str_replace('.myshopify.com', '', $shopDomain);
+
+        $user = \App\Models\User::query()
+            ->where(function ($query) use ($shopDomain, $short) {
+                $query->where('name', $shopDomain)
+                    ->orWhere('name', $short);
+            })
+            ->first();
+
+        return $user?->id;
+    }
+
     public function update($id, array $data)
     {
         return DB::transaction(function () use ($id, $data) {

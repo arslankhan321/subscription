@@ -73,19 +73,20 @@
         log("CONFIG", "Resolved app base", { appBase, widgetName: widgetName || "(auto-active)" });
 
         const productData = parseProductData();
-        if (!productData) {
-            error("PRODUCT", "No selling plans found — check plan is published and product is attached in Subscribify");
+        if (!productData?.productId) {
+            error("PRODUCT", "No product data — theme block did not render #subscription-widget-data");
             return;
         }
 
+        const shopDomain = (mount.dataset.shop || productData.shop || "").trim();
+
         log("PRODUCT", "Product data parsed", {
+            productId: productData.productId,
+            shop: shopDomain || "(missing)",
             selectedVariantId: productData.selectedVariantId,
             variantCount: Object.keys(productData.variants || {}).length,
-            allocationCount: productData.variants?.[String(productData.selectedVariantId)]?.allocations?.length ?? 0,
-            plans: (productData.variants?.[String(productData.selectedVariantId)]?.allocations || []).map((a) => ({
-                id: a.sellingPlanId,
-                name: a.name,
-            })),
+            allocationCount:
+                productData.variants?.[String(productData.selectedVariantId)]?.allocations?.length ?? 0,
         });
 
         placeWidgetNearForm(mount);
@@ -97,9 +98,13 @@
         root.innerHTML = `<div class="po-root"><div class="po-widget" style="padding:1rem;color:#6b7280;">Loading subscription options…</div></div>`;
 
         const state = {
+            mode: "auto_charge",
             selectedId: "one-time",
+            selectedOptionId: null,
             variantId: String(productData.selectedVariantId),
             productData,
+            invoicePlan: null,
+            shop: shopDomain,
         };
 
         const cssUrl = `${appBase}/storefront/widget.css`;
@@ -135,17 +140,64 @@
                 const settings = widget.settings || {};
                 applyCssVars(root, settings);
 
-                log("RENDER", "Rendering widget", {
-                    name: widget.name,
-                    template: widget.template,
-                    status: "active",
-                });
+                const planUrl =
+                    `${appBase}/storefront/products/${encodeURIComponent(productData.productId)}/plan` +
+                    (shopDomain ? `?shop=${encodeURIComponent(shopDomain)}` : "");
 
-                render(root, widget.template, settings, state);
-                bindSellingPlanSync(state);
-                watchVariantChanges(mount, root, widget.template, settings, state);
+                let planPayload = null;
+                try {
+                    const planRes = await fetchJson(planUrl);
+                    planPayload = planRes?.success ? planRes.data : null;
+                    log("PLAN", "Storefront plan lookup", planPayload);
+                } catch (planError) {
+                    warn("PLAN", "Plan lookup failed — falling back to selling plans", planError);
+                }
 
-                log("DONE", "Widget ready");
+                // Prefer auto_charge when selling-plan allocations exist (even if an
+                // invoice plan is also attached — matches storefrontPlanForProduct).
+                if (productHasSellingPlanAllocations(productData)) {
+                    log("RENDER", "Rendering auto_charge widget", {
+                        name: widget.name,
+                        template: widget.template,
+                        planType: planPayload?.plan_type ?? null,
+                    });
+
+                    render(root, widget.template, settings, state);
+                    bindSellingPlanSync(state);
+                    watchVariantChanges(mount, root, widget.template, settings, state);
+
+                    log("DONE", "Widget ready");
+                    return;
+                }
+
+                if (
+                    planPayload?.plan_type === "recurring_invoice" &&
+                    Array.isArray(planPayload.options) &&
+                    planPayload.options.length > 0
+                ) {
+                    state.mode = "recurring_invoice";
+                    state.invoicePlan = planPayload;
+                    state.selectedId = "subscribe";
+                    state.selectedOptionId = String(planPayload.options[0].id);
+                    state.variantId = String(
+                        getCurrentVariantId() || productData.selectedVariantId || state.variantId
+                    );
+
+                    log("RENDER", "Rendering separate recurring-invoice dropdown", {
+                        planId: planPayload.plan_id,
+                        optionCount: planPayload.options.length,
+                        variantId: state.variantId,
+                        variantIds: planPayload.variant_ids || [],
+                    });
+
+                    applyInvoiceVisibility(mount, root, settings, state);
+                    watchVariantChangesInvoice(mount, root, settings, state);
+                    log("DONE", "Recurring invoice dropdown ready");
+                    return;
+                }
+
+                warn("PRODUCT", "No recurring_invoice plan and no selling plan allocations — hiding widget");
+                mount.remove();
             })
             .catch((fetchError) => {
                 error("FETCH", "Failed to load widget config", fetchError);
@@ -217,31 +269,16 @@
             const jsonText = extractJsonText(node.textContent);
             const data = JSON.parse(jsonText);
             const selectedKey = String(data.selectedVariantId);
-            let variant = data.variants?.[selectedKey];
 
             log("PRODUCT", "Raw product JSON parsed", {
+                productId: data.productId,
+                shop: data.shop,
                 selectedVariantId: selectedKey,
                 variants: Object.keys(data.variants || {}).map((id) => ({
                     id,
                     allocations: data.variants[id]?.allocations?.length ?? 0,
                 })),
             });
-
-            if (!variant?.allocations?.length) {
-                warn("PRODUCT", `Selected variant ${selectedKey} has no allocations, searching fallback variant`);
-                const fallbackKey = Object.keys(data.variants || {}).find((key) => {
-                    return (data.variants[key]?.allocations?.length ?? 0) > 0;
-                });
-
-                if (!fallbackKey) {
-                    error("PRODUCT", "No variant has selling plan allocations", data.variants);
-                    return null;
-                }
-
-                log("PRODUCT", `Using fallback variant ${fallbackKey}`);
-                data.selectedVariantId = fallbackKey;
-                variant = data.variants[fallbackKey];
-            }
 
             // Liquid already filtered by group ID; only drop other apps' tagged rows
             const appId = data.appId || "subscribify";
@@ -254,16 +291,8 @@
                 });
             });
 
-            const selectedKeyFinal = String(data.selectedVariantId);
-            if (!(data.variants?.[selectedKeyFinal]?.allocations?.length > 0)) {
-                const fallbackKey = Object.keys(data.variants || {}).find((key) => {
-                    return (data.variants[key]?.allocations?.length ?? 0) > 0;
-                });
-                if (!fallbackKey) {
-                    error("PRODUCT", "No Subscribify selling plans after app filter", { appId });
-                    return null;
-                }
-                data.selectedVariantId = fallbackKey;
+            if (!data.variants?.[selectedKey] && Object.keys(data.variants || {}).length) {
+                data.selectedVariantId = Object.keys(data.variants)[0];
             }
 
             return data;
@@ -271,6 +300,12 @@
             error("PRODUCT", "Invalid product JSON in theme block", parseError);
             return null;
         }
+    }
+
+    function productHasSellingPlanAllocations(data) {
+        return Object.keys(data?.variants || {}).some(
+            (key) => (data.variants[key]?.allocations?.length ?? 0) > 0
+        );
     }
 
     function fetchJson(url) {
@@ -800,12 +835,378 @@
                 return;
             }
 
-            form.parentNode.insertBefore(mount, form);
-            ensureMountVisible(mount);
-            log("PLACE", "Widget inserted before product form");
+            if (form.parentNode && form.parentNode.contains(form)) {
+                form.parentNode.insertBefore(mount, form);
+                ensureMountVisible(mount);
+                log("PLACE", "Widget inserted before product form");
+            }
         } catch (placeError) {
             warn("PLACE", "Could not reposition widget — leaving in theme block position", placeError);
         }
+    }
+
+    /**
+     * Separate UI for recurring_invoice — one closed dropdown + discount text.
+     * Styles are inlined into Shadow DOM so cached widget.css cannot break the look.
+     */
+    function renderInvoice(root, settings, state) {
+        const plan = state.invoicePlan;
+        const options = plan.options || [];
+        const activeOption =
+            options.find((o) => String(o.id) === String(state.selectedOptionId)) || options[0];
+
+        if (activeOption && String(state.selectedOptionId) !== String(activeOption.id)) {
+            state.selectedOptionId = String(activeOption.id);
+        }
+
+        state.selectedId = "subscribe";
+        state.invoiceDropdownOpen = Boolean(state.invoiceDropdownOpen);
+
+        const discountCopy =
+            plan.give_discount && String(plan.discount_description || "").trim()
+                ? String(plan.discount_description).trim()
+                : "";
+        const open = state.invoiceDropdownOpen;
+        const activeLabel = formatInvoiceOptionLabel(activeOption);
+
+        const listItems = options
+            .map((opt) => {
+                const selected = String(opt.id) === String(activeOption?.id);
+                const save =
+                    plan.give_discount && opt.give_discount && opt.discount_amount
+                        ? `<span class="ri-option-save">Save ${escapeHtml(
+                              String(Number(opt.discount_amount))
+                          )}%</span>`
+                        : "";
+                return `
+                    <li role="presentation">
+                        <button
+                            type="button"
+                            class="ri-option${selected ? " ri-option--selected" : ""}"
+                            data-invoice-option="${escapeHtml(String(opt.id))}"
+                            role="option"
+                            aria-selected="${selected ? "true" : "false"}"
+                        >
+                            <span class="ri-option-label">${escapeHtml(opt.label || "")}</span>
+                            ${save}
+                        </button>
+                    </li>`;
+            })
+            .join("");
+
+        root.innerHTML = `
+            <style>${invoiceDropdownCss()}</style>
+            <div class="ri-widget" data-subscribify-invoice="true">
+                <div class="ri-dropdown${open ? " ri-dropdown--open" : ""}">
+                    <button
+                        type="button"
+                        class="ri-trigger"
+                        data-invoice-toggle
+                        aria-haspopup="listbox"
+                        aria-expanded="${open ? "true" : "false"}"
+                    >
+                        <span class="ri-trigger-text">${escapeHtml(activeLabel)}</span>
+                        <span class="ri-trigger-caret" aria-hidden="true"></span>
+                    </button>
+                    <ul class="ri-menu" role="listbox"${open ? "" : " hidden"}>
+                        ${listItems}
+                    </ul>
+                </div>
+                ${
+                    discountCopy
+                        ? `<p class="ri-discount-copy">${escapeHtml(discountCopy)}</p>`
+                        : ""
+                }
+            </div>`;
+
+        bindInvoiceInteractions(root, settings, state);
+        syncInvoiceProperties(state);
+        clearSellingPlanInput();
+    }
+
+    function invoiceDropdownCss() {
+        return `
+.ri-widget{box-sizing:border-box;width:100%;margin:0 0 1rem;font-family:inherit;color:#111827}
+.ri-widget *,.ri-widget *::before,.ri-widget *::after{box-sizing:border-box}
+.ri-dropdown{position:relative;width:100%}
+.ri-trigger{
+  width:100%;display:flex;align-items:center;justify-content:space-between;gap:.75rem;
+  padding:.9rem 1rem;border:1.5px solid #d1d5db;border-radius:12px;background:#fff;
+  box-shadow:0 1px 2px rgba(16,24,40,.05);font:inherit;font-size:.95rem;font-weight:600;
+  color:#111827;cursor:pointer;text-align:left
+}
+.ri-trigger:hover{border-color:#9ca3af}
+.ri-dropdown--open .ri-trigger{
+  border-color:#111827;box-shadow:0 0 0 3px rgba(17,24,39,.12)
+}
+.ri-trigger-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ri-trigger-caret{
+  width:.55rem;height:.55rem;flex-shrink:0;border-right:2px solid #6b7280;border-bottom:2px solid #6b7280;
+  transform:rotate(45deg) translateY(-2px);transition:transform .15s ease
+}
+.ri-dropdown--open .ri-trigger-caret{transform:rotate(225deg) translateY(-1px)}
+.ri-menu{
+  list-style:none;margin:0;position:absolute;z-index:40;left:0;right:0;top:calc(100% + 6px);
+  display:flex;flex-direction:column;gap:.15rem;padding:.4rem;border:1.5px solid #d1d5db;
+  border-radius:12px;background:#fff;box-shadow:0 14px 30px rgba(16,24,40,.16);max-height:240px;overflow:auto
+}
+.ri-menu[hidden]{display:none !important}
+.ri-option{
+  appearance:none;border:0;background:transparent;width:100%;display:flex;align-items:center;
+  justify-content:space-between;gap:.75rem;padding:.7rem .8rem;border-radius:8px;cursor:pointer;
+  font:inherit;font-size:.92rem;color:#111827;text-align:left
+}
+.ri-option:hover{background:#f3f4f6}
+.ri-option--selected{background:#111827;color:#fff}
+.ri-option--selected .ri-option-save{background:rgba(255,255,255,.18);color:#fff}
+.ri-option-label{font-weight:600}
+.ri-option-save{
+  flex-shrink:0;padding:.15rem .45rem;border-radius:999px;background:#ecfdf5;color:#047857;
+  font-size:.72rem;font-weight:700
+}
+.ri-discount-copy{
+  margin:.75rem 0 0;padding:.75rem .9rem;border-radius:10px;background:#f8fafc;
+  border-left:3px solid #111827;font-size:.9rem;font-style:italic;line-height:1.45;color:#374151
+}`;
+    }
+
+    function formatInvoiceOptionLabel(option) {
+        if (!option) return "Select interval";
+        return option.label || "Select interval";
+    }
+
+    function bindInvoiceInteractions(root, settings, state) {
+        const toggle = root.querySelector("[data-invoice-toggle]");
+        if (toggle) {
+            toggle.addEventListener("click", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                state.invoiceDropdownOpen = !state.invoiceDropdownOpen;
+                renderInvoice(root, settings, state);
+            });
+        }
+
+        root.querySelectorAll("[data-invoice-option]").forEach((btn) => {
+            btn.addEventListener("click", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                state.selectedId = "subscribe";
+                state.selectedOptionId = String(btn.dataset.invoiceOption);
+                state.invoiceDropdownOpen = false;
+                log("SELECT", "Invoice interval changed", {
+                    optionId: state.selectedOptionId,
+                });
+                renderInvoice(root, settings, state);
+            });
+        });
+    }
+
+    function getCurrentVariantId() {
+        const form = getProductForm();
+        const input = form?.querySelector('[name="id"]');
+        return input?.value ? String(input.value) : null;
+    }
+
+    function normalizeIdSet(ids) {
+        const set = new Set();
+        (ids || []).forEach((id) => {
+            const raw = String(id || "").trim();
+            if (!raw) return;
+            set.add(raw);
+            const numeric = raw.includes("gid://")
+                ? String(parseInt(raw.split("/").pop(), 10) || "")
+                : String(raw.replace(/\D+/g, "") || "");
+            if (numeric) {
+                set.add(numeric);
+                set.add(`gid://shopify/ProductVariant/${numeric}`);
+            }
+        });
+        return set;
+    }
+
+    function invoiceAllowsVariant(plan, variantId) {
+        const allowed = normalizeIdSet(plan?.variant_ids || []);
+        if (!allowed.size) {
+            // No variant rows stored — treat as product-level (show).
+            return true;
+        }
+        const candidates = normalizeIdSet([variantId]);
+        for (const id of candidates) {
+            if (allowed.has(id)) return true;
+        }
+        return false;
+    }
+
+    function applyInvoiceVisibility(mount, root, settings, state) {
+        const allowed = invoiceAllowsVariant(state.invoicePlan, state.variantId);
+
+        if (!allowed) {
+            mount.style.display = "none";
+            root.innerHTML = "";
+            clearInvoicePropertiesOnAllForms();
+            clearSellingPlanInput();
+            log("VARIANT", "Invoice widget hidden — variant not on plan", {
+                variantId: state.variantId,
+            });
+            return;
+        }
+
+        mount.style.display = "";
+        renderInvoice(root, settings, state);
+        log("VARIANT", "Invoice widget shown for variant", { variantId: state.variantId });
+    }
+
+    function clearInvoicePropertiesOnAllForms() {
+        const forms = Array.from(
+            document.querySelectorAll('form[action*="/cart/add"], form.product-form')
+        ).filter((form) => !isInstallmentsForm(form));
+        forms.forEach((form) => clearInvoiceProperties(form));
+    }
+
+    function watchVariantChangesInvoice(mount, root, settings, state) {
+        const form = getProductForm();
+        if (!form) return;
+
+        const variantInput = form.querySelector('[name="id"]');
+        if (!variantInput) return;
+
+        const onVariantChange = () => {
+            state.variantId = String(variantInput.value || state.variantId);
+            applyInvoiceVisibility(mount, root, settings, state);
+        };
+
+        variantInput.addEventListener("change", onVariantChange);
+
+        // Many themes update variant via events / Shopify events.
+        document.addEventListener("change", (event) => {
+            if (event.target === variantInput || event.target?.name === "id") {
+                onVariantChange();
+            }
+        });
+    }
+
+    const INVOICE_PROPERTY_KEYS = [
+        "_subscribify_plan_type",
+        "_subscribify_plan_id",
+        "_subscribify_plan_option_id",
+        "_subscribify_discount_amount",
+        "_subscribify_discount_type",
+        "Interval",
+        "Discount",
+        "Discount description",
+    ];
+
+    function findOrCreatePropertyInput(form, key) {
+        const name = `properties[${key}]`;
+        let input = form.querySelector(`input[name="${name}"]`);
+
+        if (!input) {
+            input = document.createElement("input");
+            input.type = "hidden";
+            input.name = name;
+            input.setAttribute("data-subscribify-prop", key);
+            form.appendChild(input);
+        }
+
+        return input;
+    }
+
+    function clearInvoiceProperties(form) {
+        INVOICE_PROPERTY_KEYS.forEach((key) => {
+            const input =
+                form.querySelector(`input[name="properties[${key}]"]`) ||
+                form.querySelector(`input[data-subscribify-prop="${key}"]`);
+            if (input) {
+                input.value = "";
+                input.remove();
+            }
+        });
+    }
+
+    function syncInvoiceProperties(state) {
+        const forms = Array.from(
+            document.querySelectorAll('form[action*="/cart/add"], form.product-form')
+        ).filter((form) => !isInstallmentsForm(form));
+        const primary = getProductForm();
+        if (primary && !forms.includes(primary)) forms.unshift(primary);
+
+        if (!forms.length) {
+            warn("FORM", "Could not find product form for invoice properties");
+            return;
+        }
+
+        if (!invoiceAllowsVariant(state.invoicePlan, state.variantId)) {
+            forms.forEach((form) => clearInvoiceProperties(form));
+            return;
+        }
+
+        const subscribe = state.selectedId !== "one-time";
+        const plan = state.invoicePlan;
+        const option =
+            plan?.options?.find((o) => String(o.id) === String(state.selectedOptionId)) ||
+            plan?.options?.[0];
+
+        forms.forEach((form) => {
+            if (!subscribe || !plan || !option) {
+                clearInvoiceProperties(form);
+                return;
+            }
+
+            const values = {
+                _subscribify_plan_type: "recurring_invoice",
+                _subscribify_plan_id: String(plan.plan_id),
+                _subscribify_plan_option_id: String(option.id),
+                Interval: option.label || "",
+            };
+
+            if (plan.give_discount) {
+                const amount = option.discount_amount ?? plan.discount_amount;
+                const type = option.discount_type || plan.discount_type || "Percentage off";
+                if (amount != null && amount !== "") {
+                    values._subscribify_discount_amount = String(amount);
+                    values.Discount =
+                        String(type).toLowerCase().includes("percent")
+                            ? `${Number(amount)}%`
+                            : String(amount);
+                }
+                if (type) {
+                    values._subscribify_discount_type = String(type);
+                }
+                if (plan.discount_description) {
+                    values["Discount description"] = String(plan.discount_description);
+                }
+            }
+
+            // Remove stale discount keys when discount is off.
+            clearInvoiceProperties(form);
+            Object.entries(values).forEach(([key, value]) => {
+                const input = findOrCreatePropertyInput(form, key);
+                input.value = value;
+            });
+        });
+
+        log("FORM", subscribe ? "Invoice properties assigned" : "Invoice properties cleared", {
+            optionId: option?.id ?? null,
+            variantId: state.variantId,
+            giveDiscount: Boolean(plan?.give_discount),
+            formsUpdated: forms.length,
+        });
+    }
+
+    function clearSellingPlanInput() {
+        const forms = Array.from(
+            document.querySelectorAll('form[action*="/cart/add"], form.product-form')
+        ).filter((form) => !isInstallmentsForm(form));
+
+        forms.forEach((form) => {
+            const input =
+                form.querySelector('input[name="selling_plan"]') ||
+                form.querySelector('input[data-subscribify-selling-plan="true"]');
+            if (input) {
+                input.value = "";
+                input.removeAttribute("value");
+            }
+        });
     }
 
     function findOrCreateSellingPlanInput(form) {
