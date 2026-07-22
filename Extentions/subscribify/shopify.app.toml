@@ -2,7 +2,7 @@
 
 client_id = "a6444af8f1f7bd85047bfcdf2ddb0a16"
 name = "Subscribify"
-application_url = "https://hazards-nil-seventh-bye.trycloudflare.com"
+application_url = "https://richards-cooper-correction-laugh.trycloudflare.com"
 embedded = true
 
 [build]
@@ -19,10 +19,10 @@ use_legacy_install_flow = true
 
 [auth]
 redirect_urls = [
-  "https://hazards-nil-seventh-bye.trycloudflare.com/authenticate"
+  "https://richards-cooper-correction-laugh.trycloudflare.com/authenticate"
 ]
 
 [app_proxy]
-url = "https://hazards-nil-seventh-bye.trycloudflare.com"
+url = "https://richards-cooper-correction-laugh.trycloudflare.com"
 subpath = "subscribify"
 prefix = "apps"

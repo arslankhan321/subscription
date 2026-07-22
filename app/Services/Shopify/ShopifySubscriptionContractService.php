@@ -2410,6 +2410,140 @@ class ShopifySubscriptionContractService
     }
 
     /**
+     * Numeric Partner app id for this installation (matches Order.app_id on auto-charge orders).
+     */
+    public function fetchCurrentAppLegacyId(User $shop): ?int
+    {
+        $cacheKey = 'shopify_current_app_legacy_id';
+
+        $cached = cache()->get($cacheKey);
+
+        if (is_int($cached) || (is_string($cached) && is_numeric($cached))) {
+            return (int) $cached;
+        }
+
+        $data = $this->graphql->executeForShop($shop, <<<'GQL'
+        {
+            currentAppInstallation {
+                app {
+                    id
+                }
+            }
+        }
+        GQL);
+
+        $appGid = $data['currentAppInstallation']['app']['id'] ?? null;
+
+        if (! is_string($appGid) || $appGid === '') {
+            return null;
+        }
+
+        $parts = explode('/', $appGid);
+        $legacyId = end($parts);
+
+        if (! is_numeric($legacyId)) {
+            return null;
+        }
+
+        $legacyId = (int) $legacyId;
+        cache()->put($cacheKey, $legacyId, now()->addDay());
+
+        return $legacyId;
+    }
+
+    /**
+     * Load an order with line-item subscription contracts (own contracts only).
+     *
+     * @return array{
+     *   id: ?string,
+     *   legacy_resource_id: ?string,
+     *   name: ?string,
+     *   financial_status: ?string,
+     *   fulfillment_status: ?string,
+     *   processed_at: ?string,
+     *   created_at: ?string,
+     *   total_price: ?string,
+     *   currency_code: ?string,
+     *   contract_gids: list<string>
+     * }|null
+     */
+    public function fetchOrderSubscriptionContext(User $shop, string $orderGid): ?array
+    {
+        $query = <<<'GQL'
+        query OrderSubscriptionContext($id: ID!) {
+            order(id: $id) {
+                id
+                legacyResourceId
+                name
+                displayFinancialStatus
+                displayFulfillmentStatus
+                processedAt
+                createdAt
+                totalPriceSet {
+                    shopMoney {
+                        amount
+                        currencyCode
+                    }
+                }
+                lineItems(first: 50) {
+                    edges {
+                        node {
+                            contract {
+                                id
+                                app {
+                                    id
+                                }
+                            }
+                            sellingPlan {
+                                name
+                                sellingPlanId
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query, [
+            'id' => $orderGid,
+        ]);
+
+        $order = $data['order'] ?? null;
+
+        if ($order === null) {
+            return null;
+        }
+
+        $contractGids = [];
+
+        foreach ($order['lineItems']['edges'] ?? [] as $edge) {
+            $contractId = $edge['node']['contract']['id'] ?? null;
+
+            if (is_string($contractId) && $contractId !== '') {
+                $contractGids[$contractId] = $contractId;
+            }
+        }
+
+        $money = $order['totalPriceSet']['shopMoney'] ?? [];
+
+        return [
+            'id' => $order['id'] ?? null,
+            'legacy_resource_id' => isset($order['legacyResourceId'])
+                ? (string) $order['legacyResourceId']
+                : null,
+            'name' => $order['name'] ?? null,
+            'financial_status' => $order['displayFinancialStatus'] ?? null,
+            'fulfillment_status' => $order['displayFulfillmentStatus'] ?? null,
+            'processed_at' => $order['processedAt'] ?? null,
+            'created_at' => $order['createdAt'] ?? null,
+            'total_price' => $money['amount'] ?? null,
+            'currency_code' => $money['currencyCode'] ?? null,
+            'contract_gids' => array_values($contractGids),
+        ];
+    }
+
+    /**
      * Prepaid origin order → scheduled / open fulfillment orders (process deliveries).
      *
      * @param  list<string>  $orderGids

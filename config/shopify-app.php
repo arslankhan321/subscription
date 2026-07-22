@@ -1,5 +1,21 @@
 <?php
 
+use App\Listeners\AppInstalledListener;
+use App\Listeners\AppUninstalledListener;
+use App\Listeners\PlanActivatedListener;
+use App\Listeners\ShopAuthenticatedListener;
+use App\Listeners\ShopDeletedListener;
+use Gnikyt\BasicShopifyAPI\Deferrers\Sleep;
+use Gnikyt\BasicShopifyAPI\Store\Memory;
+use Osiset\ShopifyApp\Messaging\Events\AppInstalledEvent;
+use Osiset\ShopifyApp\Messaging\Events\AppUninstalledEvent;
+use Osiset\ShopifyApp\Messaging\Events\PlanActivatedEvent;
+use Osiset\ShopifyApp\Messaging\Events\ShopAuthenticatedEvent;
+use Osiset\ShopifyApp\Messaging\Events\ShopDeletedEvent;
+use Osiset\ShopifyApp\Objects\Enums\ThemeSupportLevel;
+use Osiset\ShopifyApp\Storage\Models\Charge;
+use Osiset\ShopifyApp\Storage\Models\Plan;
+
 return [
     /*
     |--------------------------------------------------------------------------
@@ -395,20 +411,20 @@ return [
     */
 
     'listen' => [
-        \Osiset\ShopifyApp\Messaging\Events\AppInstalledEvent::class => [
-            // \App\Listeners\MyListener::class,
+        AppInstalledEvent::class => [
+            AppInstalledListener::class,
         ],
-        \Osiset\ShopifyApp\Messaging\Events\ShopAuthenticatedEvent::class => [
-            // \App\Listeners\MyListener::class,
+        ShopAuthenticatedEvent::class => [
+            ShopAuthenticatedListener::class,
         ],
-        \Osiset\ShopifyApp\Messaging\Events\ShopDeletedEvent::class => [
-            // \App\Listeners\MyListener::class,
+        ShopDeletedEvent::class => [
+            ShopDeletedListener::class,
         ],
-        \Osiset\ShopifyApp\Messaging\Events\AppUninstalledEvent::class => [
-            // \App\Listeners\MyListener::class,
+        AppUninstalledEvent::class => [
+            AppUninstalledListener::class,
         ],
-        \Osiset\ShopifyApp\Messaging\Events\PlanActivatedEvent::class => [
-            // \App\Listeners\MyListener::class,
+        PlanActivatedEvent::class => [
+            PlanActivatedListener::class,
         ],
     ],
 

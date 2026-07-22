@@ -14,6 +14,34 @@ class SubscriptionPlanController extends Controller
 
     public function index()
     {
+    // $shop = auth()->user();
+
+    // $query = <<<'GQL'
+    //         query {
+    //             webhookSubscriptions(first: 50) {
+    //                 edges {
+    //                     node {
+    //                         id
+    //                         topic
+    //                         endpoint {
+    //                             __typename
+    //                             ... on WebhookHttpEndpoint {
+    //                                 callbackUrl
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     GQL;
+
+        
+    //     $response = $shop->api()->graph($query);
+    //     $edges = $response['body']['data']['webhookSubscriptions']['edges'] ?? [];
+    //     $edges = json_decode(json_encode($edges), true);
+// dd($response);
+
+       
         return response()->json([
             'success' => true,
             'data' => $this->service->index(),

@@ -105,6 +105,209 @@ class SubscriptionContractSyncService
         return $this->persistContract($shop, $contract, $payload);
     }
 
+    /**
+     * Persist a subscription order from ORDERS_CREATE into recurring order history.
+     *
+     * Uses line-item contracts (own app only), then origin-order fallback.
+     *
+     * @return array{recorded: bool, retry: bool, subscription_id: ?int}
+     */
+    public function syncRecurringOrderFromCreate(User $shop, array $orderPayload): array
+    {
+        $orderId = isset($orderPayload['id']) ? (int) $orderPayload['id'] : 0;
+        $orderGid = $orderPayload['admin_graphql_api_id']
+            ?? ($orderId > 0 ? 'gid://shopify/Order/'.$orderId : null);
+
+        if ($orderId <= 0 || ! is_string($orderGid) || $orderGid === '') {
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null];
+        }
+
+        if (! $this->orderLooksSubscriptionRelated($shop, $orderPayload, $orderId)) {
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null];
+        }
+
+        $context = null;
+
+        try {
+            $context = $this->shopifySubscriptionContractService
+                ->fetchOrderSubscriptionContext($shop, $orderGid);
+        } catch (\Throwable $exception) {
+            Log::warning('Failed to load order subscription context', [
+                'shop_id' => $shop->id,
+                'order_id' => $orderId,
+                'message' => $exception->getMessage(),
+            ]);
+        }
+
+        $subscriptions = $this->resolveSubscriptionsForOrder(
+            $shop,
+            $orderId,
+            $context['contract_gids'] ?? []
+        );
+
+        if ($subscriptions === []) {
+            $hasSellingPlan = $this->payloadHasSellingPlan($orderPayload);
+            $hasContractOnOrder = ($context['contract_gids'] ?? []) !== [];
+
+            // Origin checkout: contract may lag behind ORDERS_CREATE.
+            if ($hasSellingPlan && ! $hasContractOnOrder) {
+                return ['recorded' => false, 'retry' => true, 'subscription_id' => null];
+            }
+
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null];
+        }
+
+        $attributes = $this->buildRecurringOrderAttributes($orderPayload, $context);
+        $recordedFor = null;
+
+        foreach ($subscriptions as $subscription) {
+            SubscriptionRecurringOrder::query()->updateOrCreate(
+                [
+                    'subscription_id' => $subscription->id,
+                    'shopify_order_id' => $orderId,
+                ],
+                $attributes + [
+                    'currency_code' => $attributes['currency_code'] ?? $subscription->currency_code,
+                ]
+            );
+            $recordedFor = $subscription->id;
+        }
+
+        return [
+            'recorded' => true,
+            'retry' => false,
+            'subscription_id' => $recordedFor,
+        ];
+    }
+
+    /**
+     * @param  list<string>  $contractGids
+     * @return list<Subscription>
+     */
+    private function resolveSubscriptionsForOrder(User $shop, int $orderId, array $contractGids): array
+    {
+        $found = [];
+
+        foreach ($contractGids as $contractGid) {
+            $subscription = Subscription::query()
+                ->where('shop_id', $shop->id)
+                ->where('shopify_gid', $contractGid)
+                ->first();
+
+            if (! $subscription) {
+                $subscription = $this->syncFromContractGid($shop, $contractGid);
+            }
+
+            if ($subscription) {
+                $found[$subscription->id] = $subscription;
+            }
+        }
+
+        if ($found !== []) {
+            return array_values($found);
+        }
+
+        $byOrigin = Subscription::query()
+            ->where('shop_id', $shop->id)
+            ->where('shopify_origin_order_id', $orderId)
+            ->get();
+
+        foreach ($byOrigin as $subscription) {
+            $found[$subscription->id] = $subscription;
+        }
+
+        return array_values($found);
+    }
+
+    private function orderLooksSubscriptionRelated(User $shop, array $orderPayload, int $orderId): bool
+    {
+        if ($this->payloadHasSellingPlan($orderPayload)) {
+            return true;
+        }
+
+        $sourceName = strtolower((string) ($orderPayload['source_name'] ?? ''));
+
+        if ($sourceName !== '' && str_contains($sourceName, 'subscription')) {
+            return true;
+        }
+
+        $orderAppId = $orderPayload['app_id'] ?? null;
+
+        if ($orderAppId !== null && $orderAppId !== '') {
+            try {
+                $ourAppId = $this->shopifySubscriptionContractService->fetchCurrentAppLegacyId($shop);
+
+                if ($ourAppId !== null && (int) $orderAppId === $ourAppId) {
+                    return true;
+                }
+            } catch (\Throwable $exception) {
+                Log::warning('Unable to resolve current Shopify app id for order filter', [
+                    'shop_id' => $shop->id,
+                    'message' => $exception->getMessage(),
+                ]);
+            }
+        }
+
+        return Subscription::query()
+            ->where('shop_id', $shop->id)
+            ->where('shopify_origin_order_id', $orderId)
+            ->exists();
+    }
+
+    private function payloadHasSellingPlan(array $orderPayload): bool
+    {
+        foreach ($orderPayload['line_items'] ?? [] as $lineItem) {
+            if (! empty($lineItem['selling_plan_allocation']) || ! empty($lineItem['selling_plan_id'])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $context
+     * @return array{
+     *   shopify_gid: ?string,
+     *   order_name: ?string,
+     *   financial_status: ?string,
+     *   fulfillment_status: ?string,
+     *   total_price: mixed,
+     *   currency_code: ?string,
+     *   processed_at: ?Carbon,
+     *   shopify_created_at: ?Carbon
+     * }
+     */
+    private function buildRecurringOrderAttributes(array $orderPayload, ?array $context): array
+    {
+        $financial = $context['financial_status']
+            ?? (isset($orderPayload['financial_status'])
+                ? strtoupper((string) $orderPayload['financial_status'])
+                : null);
+
+        $fulfillment = $context['fulfillment_status']
+            ?? (isset($orderPayload['fulfillment_status'])
+                ? strtoupper((string) $orderPayload['fulfillment_status'])
+                : null);
+
+        return [
+            'shopify_gid' => $context['id']
+                ?? $orderPayload['admin_graphql_api_id']
+                ?? null,
+            'order_name' => $context['name'] ?? ($orderPayload['name'] ?? null),
+            'financial_status' => $financial,
+            'fulfillment_status' => $fulfillment,
+            'total_price' => $context['total_price'] ?? ($orderPayload['total_price'] ?? null),
+            'currency_code' => $context['currency_code'] ?? ($orderPayload['currency'] ?? null),
+            'processed_at' => $this->parseDate(
+                $context['processed_at'] ?? ($orderPayload['processed_at'] ?? null)
+            ),
+            'shopify_created_at' => $this->parseDate(
+                $context['created_at'] ?? ($orderPayload['created_at'] ?? null)
+            ),
+        ];
+    }
+
     private function persistContract(User $shop, array $contract, stdClass $payload): Subscription
     {
         return DB::transaction(function () use ($shop, $payload, $contract) {
