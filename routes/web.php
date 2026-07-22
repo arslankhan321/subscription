@@ -126,6 +126,14 @@ Route::middleware(['verify.shopify', 'verify.shopify.scopes'])->group(function (
             ->name('selling.subscriptions.fulfillments.skip');
         Route::post('subscriptions/{id}/fulfillments/refund', [SubscriptionController::class, 'refundFulfillment'])
             ->name('selling.subscriptions.fulfillments.refund');
+        Route::get('subscriptions/{id}/invoices', [SubscriptionController::class, 'invoices'])
+            ->name('selling.subscriptions.invoices');
+        Route::post('subscriptions/{id}/invoices/request-now', [SubscriptionController::class, 'requestInvoiceNow'])
+            ->name('selling.subscriptions.invoices.request-now');
+        Route::post('subscriptions/{id}/invoices/{invoiceId}/resend', [SubscriptionController::class, 'resendInvoiceEmail'])
+            ->name('selling.subscriptions.invoices.resend');
+        Route::post('subscriptions/{id}/invoices/{invoiceId}/reschedule', [SubscriptionController::class, 'rescheduleInvoice'])
+            ->name('selling.subscriptions.invoices.reschedule');
         Route::post('subscriptions/{id}/discounts', [SubscriptionController::class, 'addDiscount'])
             ->name('selling.subscriptions.discounts.store');
         Route::post('subscriptions/{id}/discounts/remove', [SubscriptionController::class, 'removeDiscount'])

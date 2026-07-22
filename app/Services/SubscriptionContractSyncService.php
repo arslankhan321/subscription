@@ -4,6 +4,9 @@ namespace App\Services;
 
 use App\Models\Customer;
 use App\Models\Subscription;
+use App\Models\SubscriptionInvoice;
+use App\Models\SubscriptionPlan;
+use App\Models\SubscriptionPlanOption;
 use App\Models\SubscriptionProduct;
 use App\Models\SubscriptionRecurringOrder;
 use App\Models\SubscriptionShipping;
@@ -108,9 +111,10 @@ class SubscriptionContractSyncService
     /**
      * Persist a subscription order from ORDERS_CREATE into recurring order history.
      *
-     * Uses line-item contracts (own app only), then origin-order fallback.
+     * Recurring invoice (cart properties) creates a local subscription first.
+     * Auto-charge uses line-item contracts (own app only), then origin-order fallback.
      *
-     * @return array{recorded: bool, retry: bool, subscription_id: ?int}
+     * @return array{recorded: bool, retry: bool, subscription_id: ?int, plan_type: ?string}
      */
     public function syncRecurringOrderFromCreate(User $shop, array $orderPayload): array
     {
@@ -119,11 +123,49 @@ class SubscriptionContractSyncService
             ?? ($orderId > 0 ? 'gid://shopify/Order/'.$orderId : null);
 
         if ($orderId <= 0 || ! is_string($orderGid) || $orderGid === '') {
-            return ['recorded' => false, 'retry' => false, 'subscription_id' => null];
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null, 'plan_type' => null];
+        }
+
+        $invoiceProps = $this->extractSubscribifyProperties($orderPayload);
+
+        // Draft invoice paid → mark schedule paid + order history (not a new subscription).
+        if (! empty($invoiceProps['_invoice_id']) || ! empty($invoiceProps['_subscription_id'])) {
+            $paid = $this->markRecurringInvoicePaidFromOrder($shop, $orderPayload, $invoiceProps);
+
+            if ($paid['recorded']) {
+                return $paid;
+            }
+        }
+
+        if (($invoiceProps['_subscribify_plan_type'] ?? null) === Subscription::PLAN_TYPE_RECURRING_INVOICE) {
+            $subscription = $this->createFromRecurringInvoiceOrder($shop, $orderPayload, $invoiceProps);
+
+            if ($subscription === null) {
+                return ['recorded' => false, 'retry' => false, 'subscription_id' => null, 'plan_type' => null];
+            }
+
+            $attributes = $this->buildRecurringOrderAttributes($orderPayload, null);
+
+            SubscriptionRecurringOrder::query()->updateOrCreate(
+                [
+                    'subscription_id' => $subscription->id,
+                    'shopify_order_id' => $orderId,
+                ],
+                $attributes + [
+                    'currency_code' => $attributes['currency_code'] ?? $subscription->currency_code,
+                ]
+            );
+
+            return [
+                'recorded' => true,
+                'retry' => false,
+                'subscription_id' => $subscription->id,
+                'plan_type' => Subscription::PLAN_TYPE_RECURRING_INVOICE,
+            ];
         }
 
         if (! $this->orderLooksSubscriptionRelated($shop, $orderPayload, $orderId)) {
-            return ['recorded' => false, 'retry' => false, 'subscription_id' => null];
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null, 'plan_type' => null];
         }
 
         $context = null;
@@ -151,16 +193,22 @@ class SubscriptionContractSyncService
 
             // Origin checkout: contract may lag behind ORDERS_CREATE.
             if ($hasSellingPlan && ! $hasContractOnOrder) {
-                return ['recorded' => false, 'retry' => true, 'subscription_id' => null];
+                return ['recorded' => false, 'retry' => true, 'subscription_id' => null, 'plan_type' => null];
             }
 
-            return ['recorded' => false, 'retry' => false, 'subscription_id' => null];
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null, 'plan_type' => null];
         }
 
         $attributes = $this->buildRecurringOrderAttributes($orderPayload, $context);
         $recordedFor = null;
 
         foreach ($subscriptions as $subscription) {
+            if ($subscription->plan_type === null || $subscription->plan_type === '') {
+                $subscription->forceFill([
+                    'plan_type' => Subscription::PLAN_TYPE_AUTO_CHARGE,
+                ])->save();
+            }
+
             SubscriptionRecurringOrder::query()->updateOrCreate(
                 [
                     'subscription_id' => $subscription->id,
@@ -177,7 +225,700 @@ class SubscriptionContractSyncService
             'recorded' => true,
             'retry' => false,
             'subscription_id' => $recordedFor,
+            'plan_type' => Subscription::PLAN_TYPE_AUTO_CHARGE,
         ];
+    }
+
+    /**
+     * When a draft-order invoice is completed, mark the local invoice paid and store order history.
+     *
+     * @param  array<string, string>  $properties
+     * @return array{recorded: bool, retry: bool, subscription_id: ?int, plan_type: ?string}
+     */
+    private function markRecurringInvoicePaidFromOrder(
+        User $shop,
+        array $orderPayload,
+        array $properties
+    ): array {
+        $orderId = (int) ($orderPayload['id'] ?? 0);
+        $invoiceId = isset($properties['_invoice_id']) ? (int) $properties['_invoice_id'] : 0;
+        $subscriptionId = isset($properties['_subscription_id'])
+            ? (int) $properties['_subscription_id']
+            : 0;
+        $cycleIndex = isset($properties['_cycle_index']) ? (int) $properties['_cycle_index'] : null;
+
+        $invoiceQuery = SubscriptionInvoice::query()
+            ->where('shop_id', $shop->id);
+
+        if ($invoiceId > 0) {
+            $invoiceQuery->where('id', $invoiceId);
+        } elseif ($subscriptionId > 0 && $cycleIndex !== null) {
+            $invoiceQuery
+                ->where('subscription_id', $subscriptionId)
+                ->where('cycle_index', $cycleIndex);
+        } else {
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null, 'plan_type' => null];
+        }
+
+        $invoice = $invoiceQuery->first();
+
+        if (! $invoice) {
+            Log::warning('Paid recurring invoice order could not match local invoice', [
+                'shop_id' => $shop->id,
+                'order_id' => $orderId,
+                'invoice_id' => $invoiceId,
+                'subscription_id' => $subscriptionId,
+                'cycle_index' => $cycleIndex,
+            ]);
+
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null, 'plan_type' => null];
+        }
+
+        $subscription = Subscription::query()
+            ->where('shop_id', $shop->id)
+            ->where('id', $invoice->subscription_id)
+            ->where('plan_type', Subscription::PLAN_TYPE_RECURRING_INVOICE)
+            ->first();
+
+        if (! $subscription) {
+            return ['recorded' => false, 'retry' => false, 'subscription_id' => null, 'plan_type' => null];
+        }
+
+        $paidAt = $this->parseDate($orderPayload['processed_at'] ?? $orderPayload['created_at'] ?? null)
+            ?? now();
+
+        if ($invoice->payment_status !== SubscriptionInvoice::STATUS_PAID) {
+            $invoice->payment_status = SubscriptionInvoice::STATUS_PAID;
+            $invoice->paid_at = $paidAt;
+            $invoice->save();
+        }
+
+        $attributes = $this->buildRecurringOrderAttributes($orderPayload, null);
+
+        SubscriptionRecurringOrder::query()->updateOrCreate(
+            [
+                'subscription_id' => $subscription->id,
+                'shopify_order_id' => $orderId,
+            ],
+            $attributes + [
+                'currency_code' => $attributes['currency_code'] ?? $subscription->currency_code,
+            ]
+        );
+
+        $nextUpcoming = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->where('payment_status', SubscriptionInvoice::STATUS_UPCOMING)
+            ->orderBy('scheduled_at')
+            ->orderBy('cycle_index')
+            ->first();
+
+        if ($nextUpcoming) {
+            $subscription->update([
+                'next_billing_date' => $nextUpcoming->scheduled_at,
+            ]);
+        }
+
+        $this->extendInvoiceSchedulesIfCompleted($subscription);
+
+        $this->activityLogService->logSystem(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_CHARGED,
+            'Invoice #'.$invoice->cycle_index.' was paid via order '
+                .($orderPayload['name'] ?? '#'.$orderId).'.',
+            [
+                'invoice_id' => $invoice->id,
+                'cycle_index' => $invoice->cycle_index,
+                'order_id' => $orderId,
+            ]
+        );
+
+        Log::info('Recurring invoice marked paid from ORDERS_CREATE', [
+            'shop_id' => $shop->id,
+            'subscription_id' => $subscription->id,
+            'invoice_id' => $invoice->id,
+            'order_id' => $orderId,
+        ]);
+
+        return [
+            'recorded' => true,
+            'retry' => false,
+            'subscription_id' => $subscription->id,
+            'plan_type' => Subscription::PLAN_TYPE_RECURRING_INVOICE,
+        ];
+    }
+
+    /**
+     * Create / upsert a local-only subscription from recurring_invoice cart properties.
+     *
+     * @param  array<string, string>  $properties
+     */
+    public function createFromRecurringInvoiceOrder(
+        User $shop,
+        array $orderPayload,
+        array $properties
+    ): ?Subscription {
+        $orderId = isset($orderPayload['id']) ? (int) $orderPayload['id'] : 0;
+        $planId = isset($properties['_subscribify_plan_id'])
+            ? (int) $properties['_subscribify_plan_id']
+            : 0;
+        $optionId = isset($properties['_subscribify_plan_option_id'])
+            ? (int) $properties['_subscribify_plan_option_id']
+            : 0;
+
+        if ($orderId <= 0 || $planId <= 0 || $optionId <= 0) {
+            Log::warning('Recurring invoice order missing plan properties', [
+                'shop_id' => $shop->id,
+                'order_id' => $orderId,
+                'properties' => $properties,
+            ]);
+
+            return null;
+        }
+
+        $plan = SubscriptionPlan::query()
+            ->where('shop_id', $shop->id)
+            ->where('id', $planId)
+            ->where('plan_type', Subscription::PLAN_TYPE_RECURRING_INVOICE)
+            ->first();
+
+        $option = SubscriptionPlanOption::query()
+            ->where('plan_id', $planId)
+            ->where('id', $optionId)
+            ->first();
+
+        if ($plan === null || $option === null) {
+            Log::warning('Recurring invoice plan/option not found for order', [
+                'shop_id' => $shop->id,
+                'order_id' => $orderId,
+                'plan_id' => $planId,
+                'option_id' => $optionId,
+            ]);
+
+            return null;
+        }
+
+        $customerPayload = $orderPayload['customer'] ?? null;
+
+        if (! is_array($customerPayload) || empty($customerPayload['id'])) {
+            Log::warning('Recurring invoice order missing customer', [
+                'shop_id' => $shop->id,
+                'order_id' => $orderId,
+            ]);
+
+            return null;
+        }
+
+        return DB::transaction(function () use (
+            $shop,
+            $orderPayload,
+            $plan,
+            $option,
+            $customerPayload,
+            $orderId
+        ) {
+            $wasNew = ! Subscription::query()
+                ->where('shop_id', $shop->id)
+                ->where('shopify_origin_order_id', $orderId)
+                ->where('plan_type', Subscription::PLAN_TYPE_RECURRING_INVOICE)
+                ->exists();
+
+            $customer = Customer::query()->updateOrCreate(
+                [
+                    'shop_id' => $shop->id,
+                    'shopify_customer_id' => (int) $customerPayload['id'],
+                ],
+                [
+                    'shopify_gid' => $customerPayload['admin_graphql_api_id']
+                        ?? ('gid://shopify/Customer/'.$customerPayload['id']),
+                    'email' => $customerPayload['email'] ?? null,
+                    'first_name' => $customerPayload['first_name'] ?? null,
+                    'last_name' => $customerPayload['last_name'] ?? null,
+                    'phone' => $customerPayload['phone'] ?? null,
+                ]
+            );
+
+            $frequency = max(1, (int) ($option->delivery_frequency ?? 1));
+            $interval = $this->normalizePlanInterval((string) ($option->delivery_interval ?? 'months'));
+            $createdAt = $this->parseDate($orderPayload['created_at'] ?? $orderPayload['processed_at'] ?? null)
+                ?? now();
+            $nextBilling = $this->addInterval($createdAt->copy(), $interval, $frequency);
+            $currency = (string) ($orderPayload['currency'] ?? 'USD');
+            $orderGid = $orderPayload['admin_graphql_api_id']
+                ?? ('gid://shopify/Order/'.$orderId);
+
+            $subscription = Subscription::query()->updateOrCreate(
+                [
+                    'shop_id' => $shop->id,
+                    'shopify_origin_order_id' => $orderId,
+                    'plan_type' => Subscription::PLAN_TYPE_RECURRING_INVOICE,
+                ],
+                [
+                    'customer_id' => $customer->id,
+                    'subscription_plan_id' => $plan->id,
+                    'subscription_plan_option_id' => $option->id,
+                    'shopify_contract_id' => null,
+                    'shopify_gid' => null,
+                    'shopify_origin_order_gid' => $orderGid,
+                    'shopify_revision_id' => null,
+                    'status' => 'active',
+                    'currency_code' => $currency,
+                    'billing_interval' => $interval,
+                    'billing_interval_count' => $frequency,
+                    'billing_min_cycles' => $option->min_orders !== null ? (int) $option->min_orders : null,
+                    'billing_max_cycles' => $option->max_orders !== null ? (int) $option->max_orders : null,
+                    'delivery_interval' => $interval,
+                    'delivery_interval_count' => $frequency,
+                    'next_billing_date' => $nextBilling,
+                    'delivery_price' => $orderPayload['total_shipping_price_set']['shop_money']['amount']
+                        ?? $orderPayload['total_shipping_price']
+                        ?? null,
+                    'delivery_price_currency' => $currency,
+                    'note' => $orderPayload['note'] ?? null,
+                    'last_payment_status' => isset($orderPayload['financial_status'])
+                        ? strtoupper((string) $orderPayload['financial_status'])
+                        : null,
+                    'shopify_created_at' => $createdAt,
+                    'shopify_updated_at' => $this->parseDate($orderPayload['updated_at'] ?? null) ?? $createdAt,
+                ]
+            );
+
+            $this->syncInvoiceProducts($shop, $subscription, $orderPayload);
+            $this->syncInvoiceShipping($subscription, $orderPayload);
+            $this->createInvoiceSchedules(
+                $shop,
+                $subscription,
+                $orderPayload,
+                (string) $frequency,
+                $interval
+            );
+
+            if ($wasNew) {
+                $this->activityLogService->log(
+                    $subscription,
+                    SubscriptionActivityLogService::ACTION_CREATED,
+                    'The recurring invoice subscription was created from order '
+                        .($orderPayload['name'] ?? '#'.$orderId).'.',
+                    'system',
+                    'System',
+                    [
+                        'order_id' => $orderId,
+                        'plan_id' => $plan->id,
+                        'plan_option_id' => $option->id,
+                    ]
+                );
+            }
+
+            return $subscription->fresh(['customer', 'products', 'shipping', 'recurringOrders', 'invoices']);
+        });
+    }
+
+    /**
+     * Seed the next 5 upcoming invoice cycles for a recurring-invoice subscription.
+     */
+    private function createInvoiceSchedules(
+        User $shop,
+        Subscription $subscription,
+        array $orderPayload,
+        string $intervalValue,
+        string $intervalUnit
+    ): void {
+        if (
+            SubscriptionInvoice::query()
+                ->where('subscription_id', $subscription->id)
+                ->exists()
+        ) {
+            return;
+        }
+
+        $orderCreatedAt = $this->parseDate($orderPayload['created_at'] ?? $orderPayload['processed_at'] ?? null)
+            ?? now();
+
+        $lineItemProperties = $this->extractInvoiceLineItemProperties($orderPayload);
+        $normalizedUnit = $this->normalizePlanInterval($intervalUnit);
+        $value = max(1, (int) $intervalValue);
+
+        for ($cycle = 1; $cycle <= 5; $cycle++) {
+            $scheduledAt = $this->addInterval($orderCreatedAt->copy(), $normalizedUnit, $value * $cycle);
+
+            SubscriptionInvoice::query()->firstOrCreate(
+                [
+                    'subscription_id' => $subscription->id,
+                    'cycle_index' => $cycle,
+                ],
+                [
+                    'shop_id' => $shop->id,
+                    'scheduled_at' => $scheduledAt,
+                    'interval_value' => $value,
+                    'interval_unit' => $normalizedUnit,
+                    'payment_status' => SubscriptionInvoice::STATUS_UPCOMING,
+                    'line_item_properties' => $lineItemProperties,
+                ]
+            );
+        }
+
+        Log::info('Invoice schedules created', [
+            'subscription_id' => $subscription->id,
+            'cycles' => 5,
+            'interval' => "{$value} {$normalizedUnit}",
+            'first_due' => $this->addInterval($orderCreatedAt->copy(), $normalizedUnit, $value)->toDateString(),
+        ]);
+    }
+
+    /**
+     * When all open invoices are paid, append the next 5 upcoming cycles.
+     */
+    private function extendInvoiceSchedulesIfCompleted(Subscription $subscription): void
+    {
+        $hasOpenInvoice = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->whereIn('payment_status', [
+                SubscriptionInvoice::STATUS_UPCOMING,
+                SubscriptionInvoice::STATUS_PENDING,
+                SubscriptionInvoice::STATUS_FAILED,
+            ])
+            ->exists();
+
+        if ($hasOpenInvoice) {
+            return;
+        }
+
+        $lastInvoice = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->orderByDesc('cycle_index')
+            ->first();
+
+        if (! $lastInvoice) {
+            return;
+        }
+
+        $intervalValue = max(1, (int) (
+            $lastInvoice->interval_value
+            ?: $subscription->billing_interval_count
+            ?: $subscription->delivery_interval_count
+            ?: 1
+        ));
+        $intervalUnit = $this->normalizePlanInterval((string) (
+            $lastInvoice->interval_unit
+            ?: $subscription->billing_interval
+            ?: $subscription->delivery_interval
+            ?: 'months'
+        ));
+        $baseScheduledAt = $lastInvoice->scheduled_at
+            ? $lastInvoice->scheduled_at->copy()
+            : now();
+        $lineItemProperties = $lastInvoice->line_item_properties ?? [];
+
+        for ($offset = 1; $offset <= 5; $offset++) {
+            $cycleIndex = (int) $lastInvoice->cycle_index + $offset;
+            $scheduledAt = $this->addInterval(
+                $baseScheduledAt->copy(),
+                $intervalUnit,
+                $intervalValue * $offset
+            );
+
+            SubscriptionInvoice::query()->firstOrCreate(
+                [
+                    'subscription_id' => $subscription->id,
+                    'cycle_index' => $cycleIndex,
+                ],
+                [
+                    'shop_id' => $subscription->shop_id,
+                    'scheduled_at' => $scheduledAt,
+                    'interval_value' => $intervalValue,
+                    'interval_unit' => $intervalUnit,
+                    'payment_status' => SubscriptionInvoice::STATUS_UPCOMING,
+                    'line_item_properties' => $lineItemProperties,
+                ]
+            );
+        }
+
+        $nextUpcoming = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->where('payment_status', SubscriptionInvoice::STATUS_UPCOMING)
+            ->orderBy('scheduled_at')
+            ->orderBy('cycle_index')
+            ->first();
+
+        if ($nextUpcoming) {
+            $subscription->update([
+                'next_billing_date' => $nextUpcoming->scheduled_at,
+            ]);
+        }
+    }
+
+    /**
+     * Preserve original line item properties for later draft-order injection.
+     *
+     * @return list<array{key: string, value: string}>
+     */
+    private function extractInvoiceLineItemProperties(array $orderPayload): array
+    {
+        foreach ($orderPayload['line_items'] ?? [] as $lineItem) {
+            $props = [];
+            $isInvoiceLine = false;
+
+            foreach ($lineItem['properties'] ?? [] as $property) {
+                $name = (string) ($property['name'] ?? '');
+                $value = (string) ($property['value'] ?? '');
+
+                if ($name === '') {
+                    continue;
+                }
+
+                if (
+                    $name === '_subscribify_plan_type'
+                    && $value === Subscription::PLAN_TYPE_RECURRING_INVOICE
+                ) {
+                    $isInvoiceLine = true;
+                }
+
+                $props[] = [
+                    'key' => $name,
+                    'value' => $value,
+                ];
+            }
+
+            if ($isInvoiceLine && $props !== []) {
+                return $props;
+            }
+        }
+
+        // Fallback: flatten first line with any subscribify props.
+        $fallback = [];
+        foreach ($orderPayload['line_items'] ?? [] as $lineItem) {
+            foreach ($lineItem['properties'] ?? [] as $property) {
+                $name = (string) ($property['name'] ?? '');
+                if ($name === '') {
+                    continue;
+                }
+                $fallback[] = [
+                    'key' => $name,
+                    'value' => (string) ($property['value'] ?? ''),
+                ];
+            }
+            if ($fallback !== []) {
+                return $fallback;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function extractSubscribifyProperties(array $orderPayload): array
+    {
+        $props = [];
+        $trackedKeys = [
+            '_subscribify_plan_type',
+            '_subscribify_plan_id',
+            '_subscribify_plan_option_id',
+            '_subscribify_discount_amount',
+            '_subscribify_discount_type',
+            '_subscription_type',
+            '_subscription_id',
+            '_invoice_id',
+            '_cycle_index',
+            'Interval',
+            'Discount',
+            'Discount description',
+        ];
+
+        foreach ($orderPayload['line_items'] ?? [] as $lineItem) {
+            foreach ($lineItem['properties'] ?? [] as $property) {
+                $name = (string) ($property['name'] ?? '');
+                $value = $property['value'] ?? null;
+
+                if ($name === '' || $value === null || $value === '') {
+                    continue;
+                }
+
+                if (
+                    str_starts_with($name, '_subscribify_')
+                    || str_starts_with($name, '_subscription_')
+                    || str_starts_with($name, '_invoice_')
+                    || str_starts_with($name, '_cycle_')
+                    || in_array($name, $trackedKeys, true)
+                ) {
+                    $props[$name] = (string) $value;
+                }
+            }
+        }
+
+        foreach ($orderPayload['note_attributes'] ?? [] as $attribute) {
+            $name = (string) ($attribute['name'] ?? '');
+            $value = $attribute['value'] ?? null;
+
+            if ($name === '' || $value === null || $value === '') {
+                continue;
+            }
+
+            if (
+                (
+                    str_starts_with($name, '_subscribify_')
+                    || str_starts_with($name, '_subscription_')
+                    || str_starts_with($name, '_invoice_')
+                    || str_starts_with($name, '_cycle_')
+                    || in_array($name, $trackedKeys, true)
+                )
+                && ! isset($props[$name])
+            ) {
+                $props[$name] = (string) $value;
+            }
+        }
+
+        return $props;
+    }
+
+    private function syncInvoiceProducts(User $shop, Subscription $subscription, array $orderPayload): void
+    {
+        $invoiceLines = [];
+
+        foreach ($orderPayload['line_items'] ?? [] as $lineItem) {
+            $isInvoiceLine = false;
+
+            foreach ($lineItem['properties'] ?? [] as $property) {
+                if (
+                    ($property['name'] ?? null) === '_subscribify_plan_type'
+                    && ($property['value'] ?? null) === Subscription::PLAN_TYPE_RECURRING_INVOICE
+                ) {
+                    $isInvoiceLine = true;
+                    break;
+                }
+            }
+
+            if ($isInvoiceLine) {
+                $invoiceLines[] = $lineItem;
+            }
+        }
+
+        if ($invoiceLines === []) {
+            $invoiceLines = $orderPayload['line_items'] ?? [];
+        }
+
+        $variantIds = [];
+        foreach ($invoiceLines as $lineItem) {
+            if (! empty($lineItem['variant_id'])) {
+                $variantIds[] = (int) $lineItem['variant_id'];
+            }
+        }
+
+        $imageByVariantId = $this->shopifySubscriptionContractService
+            ->fetchVariantImageUrls($shop, $variantIds);
+
+        $lineIds = [];
+
+        foreach ($invoiceLines as $lineItem) {
+            $lineId = isset($lineItem['admin_graphql_api_id'])
+                ? (string) $lineItem['admin_graphql_api_id']
+                : (isset($lineItem['id']) ? 'gid://shopify/LineItem/'.$lineItem['id'] : null);
+
+            if ($lineId === null) {
+                continue;
+            }
+
+            $lineIds[] = $lineId;
+            $props = [];
+
+            foreach ($lineItem['properties'] ?? [] as $property) {
+                if (! empty($property['name'])) {
+                    $props[(string) $property['name']] = (string) ($property['value'] ?? '');
+                }
+            }
+
+            $variantId = isset($lineItem['variant_id']) ? (int) $lineItem['variant_id'] : null;
+            $imageUrl = null;
+
+            if (is_array($lineItem['image'] ?? null)) {
+                $imageUrl = $lineItem['image']['src'] ?? $lineItem['image']['url'] ?? null;
+            }
+
+            if (! is_string($imageUrl) || $imageUrl === '') {
+                $imageUrl = $variantId !== null
+                    ? ($imageByVariantId[$variantId] ?? null)
+                    : null;
+            }
+
+            SubscriptionProduct::query()->updateOrCreate(
+                [
+                    'subscription_id' => $subscription->id,
+                    'shopify_line_id' => $lineId,
+                ],
+                [
+                    'shopify_product_id' => isset($lineItem['product_id']) ? (int) $lineItem['product_id'] : null,
+                    'shopify_variant_id' => $variantId,
+                    'shopify_selling_plan_id' => null,
+                    'selling_plan_name' => $props['Interval'] ?? null,
+                    'title' => (string) ($lineItem['title'] ?? 'Subscription item'),
+                    'variant_title' => $lineItem['variant_title'] ?? null,
+                    'sku' => $lineItem['sku'] ?? null,
+                    'quantity' => (int) ($lineItem['quantity'] ?? 1),
+                    'current_price' => $lineItem['price'] ?? 0,
+                    'currency_code' => $subscription->currency_code,
+                    'image_url' => $imageUrl,
+                    'requires_shipping' => (bool) ($lineItem['requires_shipping'] ?? true),
+                ]
+            );
+        }
+
+        if ($lineIds !== []) {
+            SubscriptionProduct::query()
+                ->where('subscription_id', $subscription->id)
+                ->whereNotIn('shopify_line_id', $lineIds)
+                ->delete();
+        }
+    }
+
+    private function syncInvoiceShipping(Subscription $subscription, array $orderPayload): void
+    {
+        $address = $orderPayload['shipping_address'] ?? null;
+
+        if (! is_array($address) || $address === []) {
+            return;
+        }
+
+        SubscriptionShipping::query()->updateOrCreate(
+            ['subscription_id' => $subscription->id],
+            [
+                'delivery_method_type' => 'SubscriptionDeliveryMethodShipping',
+                'shipping_option_title' => $orderPayload['shipping_lines'][0]['title'] ?? null,
+                'first_name' => $address['first_name'] ?? null,
+                'last_name' => $address['last_name'] ?? null,
+                'company' => $address['company'] ?? null,
+                'address1' => $address['address1'] ?? null,
+                'address2' => $address['address2'] ?? null,
+                'city' => $address['city'] ?? null,
+                'province' => $address['province'] ?? null,
+                'province_code' => $address['province_code'] ?? null,
+                'country' => $address['country'] ?? null,
+                'country_code' => $address['country_code'] ?? null,
+                'zip' => $address['zip'] ?? null,
+                'phone' => $address['phone'] ?? null,
+            ]
+        );
+    }
+
+    private function normalizePlanInterval(string $interval): string
+    {
+        $normalized = strtolower(trim($interval));
+
+        return match ($normalized) {
+            'day', 'days', 'DAY', 'DAYS' => 'days',
+            'week', 'weeks', 'WEEK', 'WEEKS' => 'weeks',
+            'year', 'years', 'YEAR', 'YEARS' => 'years',
+            default => 'months',
+        };
+    }
+
+    private function addInterval(Carbon $date, string $interval, int $count): Carbon
+    {
+        return match ($this->normalizePlanInterval($interval)) {
+            'days' => $date->addDays($count),
+            'weeks' => $date->addWeeks($count),
+            'years' => $date->addYears($count),
+            default => $date->addMonths($count),
+        };
     }
 
     /**
@@ -361,6 +1102,7 @@ class SubscriptionContractSyncService
                     : null,
                 'status' => strtolower((string) ($payload->status ?? 'active')),
                 'currency_code' => (string) ($payload->currency_code ?? 'USD'),
+                'plan_type' => Subscription::PLAN_TYPE_AUTO_CHARGE,
                 'billing_interval' => $billingPolicy->interval ?? null,
                 'billing_interval_count' => isset($billingPolicy->interval_count)
                     ? (int) $billingPolicy->interval_count
@@ -429,6 +1171,7 @@ class SubscriptionContractSyncService
                     : (isset($payload->revision_id) ? (int) $payload->revision_id : null),
                 'status' => strtolower((string) ($contract['status'] ?? $payload->status ?? 'active')),
                 'currency_code' => (string) ($contract['currencyCode'] ?? $payload->currency_code ?? 'USD'),
+                'plan_type' => Subscription::PLAN_TYPE_AUTO_CHARGE,
                 'billing_interval' => $billingPolicy['interval'] ?? ($payload->billing_policy->interval ?? null),
                 'billing_interval_count' => $billingPolicy['intervalCount']
                     ?? ($payload->billing_policy->interval_count ?? null),

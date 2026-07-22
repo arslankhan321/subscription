@@ -2,6 +2,10 @@
 
 namespace App\Services\Shopify;
 
+use App\Exceptions\ShopifySellingPlanException;
+use App\Models\Subscription;
+use App\Models\SubscriptionInvoice;
+use App\Models\SubscriptionPlanOption;
 use App\Models\User;
 use App\Support\PhoneNumber;
 use Carbon\Carbon;
@@ -2544,6 +2548,86 @@ class ShopifySubscriptionContractService
     }
 
     /**
+     * Map Shopify variant legacy IDs to image URLs (variant image, else product featured).
+     *
+     * @param  list<int|string>  $variantIds
+     * @return array<int, string>
+     */
+    public function fetchVariantImageUrls(User $shop, array $variantIds): array
+    {
+        $gids = [];
+
+        foreach ($variantIds as $variantId) {
+            if ($variantId === null || $variantId === '') {
+                continue;
+            }
+
+            $gid = is_string($variantId) && str_starts_with($variantId, 'gid://')
+                ? $variantId
+                : 'gid://shopify/ProductVariant/'.(int) $variantId;
+
+            $gids[$gid] = (int) (is_numeric($variantId)
+                ? $variantId
+                : (preg_match('/(\d+)$/', (string) $variantId, $m) ? $m[1] : 0));
+        }
+
+        $gids = array_filter($gids);
+        if ($gids === []) {
+            return [];
+        }
+
+        $query = <<<'GQL'
+        query VariantImages($ids: [ID!]!) {
+            nodes(ids: $ids) {
+                ... on ProductVariant {
+                    id
+                    legacyResourceId
+                    image {
+                        url
+                    }
+                    product {
+                        featuredImage {
+                            url
+                        }
+                    }
+                }
+            }
+        }
+        GQL;
+
+        try {
+            $data = $this->graphql->executeForShop($shop, $query, [
+                'ids' => array_keys($gids),
+            ]);
+        } catch (\Throwable $exception) {
+            Log::warning('Unable to fetch variant images for invoice products', [
+                'shop_id' => $shop->id,
+                'message' => $exception->getMessage(),
+            ]);
+
+            return [];
+        }
+
+        $images = [];
+
+        foreach ($data['nodes'] ?? [] as $node) {
+            if (! is_array($node) || empty($node['legacyResourceId'])) {
+                continue;
+            }
+
+            $url = $node['image']['url']
+                ?? $node['product']['featuredImage']['url']
+                ?? null;
+
+            if (is_string($url) && $url !== '') {
+                $images[(int) $node['legacyResourceId']] = $url;
+            }
+        }
+
+        return $images;
+    }
+
+    /**
      * Prepaid origin order → scheduled / open fulfillment orders (process deliveries).
      *
      * @param  list<string>  $orderGids
@@ -2882,6 +2966,311 @@ class ShopifySubscriptionContractService
             'can_reschedule' => $status === 'SCHEDULED',
             'can_skip' => $status === 'SCHEDULED',
             'can_refund' => $status === 'SCHEDULED',
+        ];
+    }
+
+    /**
+     * Create a Shopify draft order + send invoice for a local recurring-invoice subscription.
+     *
+     * @return array{
+     *   success: bool,
+     *   draftOrderId?: ?string,
+     *   invoiceUrl?: ?string,
+     *   invoiceSent?: bool,
+     *   errors?: list<array{message?: string, field?: mixed}>
+     * }
+     */
+    public function createDraftFromRecurringInvoiceSubscription(
+        User $shop,
+        Subscription $subscription,
+        SubscriptionInvoice $invoice
+    ): array {
+        $subscription->loadMissing(['customer', 'products', 'shipping']);
+
+        $customer = $subscription->customer;
+        $shipping = $subscription->shipping;
+
+        if (! $customer || empty($customer->shopify_customer_id)) {
+            return [
+                'success' => false,
+                'errors' => [['message' => 'Subscription customer is missing Shopify customer id.']],
+            ];
+        }
+
+        if (empty($customer->email)) {
+            return [
+                'success' => false,
+                'errors' => [['message' => 'Customer email not found.']],
+            ];
+        }
+
+        $planOption = $subscription->subscription_plan_option_id
+            ? SubscriptionPlanOption::query()->find($subscription->subscription_plan_option_id)
+            : null;
+
+        $preservedAttrs = [];
+        foreach ($invoice->line_item_properties ?? [] as $property) {
+            $key = (string) ($property['key'] ?? $property['name'] ?? '');
+            $value = (string) ($property['value'] ?? '');
+            if ($key === '') {
+                continue;
+            }
+            $preservedAttrs[] = ['key' => $key, 'value' => $value];
+        }
+
+        $lineItems = [];
+
+        foreach ($subscription->products as $product) {
+            $variantId = $product->shopify_variant_id ?? null;
+            $qty = max(1, (int) ($product->quantity ?? 1));
+            $price = (float) ($product->current_price ?? 0);
+
+            if (! $variantId) {
+                continue;
+            }
+
+            $customAttributes = array_merge(
+                [
+                    ['key' => '_subscription_type', 'value' => 'recurring_invoice'],
+                    ['key' => '_subscription_id', 'value' => (string) $subscription->id],
+                    ['key' => '_invoice_id', 'value' => (string) $invoice->id],
+                    ['key' => '_cycle_index', 'value' => (string) $invoice->cycle_index],
+                ],
+                $preservedAttrs
+            );
+
+            $lineItem = [
+                'quantity' => $qty,
+                'title' => $product->title ?: 'Subscription item',
+                'variantId' => 'gid://shopify/ProductVariant/'.$variantId,
+                'originalUnitPrice' => number_format($price, 2, '.', ''),
+                'customAttributes' => $customAttributes,
+            ];
+
+            $discount = $this->buildRecurringInvoiceLineDiscount($planOption, $price, $qty);
+            if ($discount !== null) {
+                $lineItem['appliedDiscount'] = $discount;
+            }
+
+            $lineItems[] = $lineItem;
+        }
+
+        if ($lineItems === []) {
+            return [
+                'success' => false,
+                'errors' => [['message' => 'No line items found for recurring-invoice subscription.']],
+            ];
+        }
+
+        $cycleIndex = (int) $invoice->cycle_index;
+        $draftInput = [
+            'customerId' => 'gid://shopify/Customer/'.$customer->shopify_customer_id,
+            'email' => $customer->email,
+            'lineItems' => $lineItems,
+            'tags' => ['subscription', 'recurring-invoice', 'subscription-'.$subscription->id],
+            'note' => "Recurring invoice for subscription #{$subscription->id} — cycle #{$cycleIndex}",
+            'customAttributes' => [
+                ['key' => 'Subscription interval', 'value' => 'recurring_invoice'],
+                ['key' => '_subscription_id', 'value' => (string) $subscription->id],
+                ['key' => '_invoice_id', 'value' => (string) $invoice->id],
+                ['key' => '_cycle_index', 'value' => (string) $cycleIndex],
+            ],
+        ];
+
+        if ($shipping) {
+            $address = array_filter([
+                'firstName' => $shipping->first_name ?: ($customer->first_name ?? null),
+                'lastName' => $shipping->last_name ?: ($customer->last_name ?? null),
+                'company' => $shipping->company,
+                'address1' => $shipping->address1,
+                'address2' => $shipping->address2,
+                'city' => $shipping->city,
+                'province' => $shipping->province,
+                'country' => $shipping->country_code ?: $shipping->country,
+                'zip' => $shipping->zip,
+                'phone' => $shipping->phone ?: ($customer->phone ?? null),
+            ], fn ($value) => $value !== null && $value !== '');
+
+            if ($address !== []) {
+                $draftInput['shippingAddress'] = $address;
+                $draftInput['billingAddress'] = $address;
+            }
+        }
+
+        $draftMutation = <<<'GQL'
+        mutation CreateDraftOrder($input: DraftOrderInput!) {
+            draftOrderCreate(input: $input) {
+                draftOrder {
+                    id
+                    invoiceUrl
+                    name
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        try {
+            $draftResult = $this->graphql->mutationForShop(
+                $shop,
+                'draftOrderCreate',
+                $draftMutation,
+                ['input' => $draftInput]
+            );
+        } catch (ShopifySellingPlanException $exception) {
+            return [
+                'success' => false,
+                'errors' => $exception->userErrors !== []
+                    ? $exception->userErrors
+                    : [['message' => $exception->getMessage()]],
+            ];
+        }
+
+        $draftOrderId = $draftResult['draftOrder']['id'] ?? null;
+        $invoiceUrl = $draftResult['draftOrder']['invoiceUrl'] ?? null;
+        $draftName = $draftResult['draftOrder']['name'] ?? null;
+
+        if (! $draftOrderId) {
+            return [
+                'success' => false,
+                'errors' => [['message' => 'Draft order ID not returned after creation.']],
+            ];
+        }
+
+        $sendResult = $this->resendDraftOrderInvoice(
+            $shop,
+            (string) $draftOrderId,
+            (string) $customer->email,
+            is_string($draftName) ? $draftName : null
+        );
+
+        if (! ($sendResult['success'] ?? false)) {
+            return [
+                'success' => false,
+                'errors' => $sendResult['errors'] ?? [['message' => 'Failed to send draft invoice.']],
+                'draftOrderId' => $draftOrderId,
+                'invoiceUrl' => $invoiceUrl,
+                'invoiceSent' => false,
+            ];
+        }
+
+        return [
+            'success' => true,
+            'errors' => [],
+            'draftOrderId' => $draftOrderId,
+            'invoiceUrl' => $sendResult['invoiceUrl'] ?? $invoiceUrl,
+            'invoiceSent' => true,
+        ];
+    }
+
+    /**
+     * @return array{success: bool, errors?: list<array>, draftOrderId?: string, invoiceUrl?: ?string}
+     */
+    public function resendDraftOrderInvoice(
+        User $shop,
+        string $draftOrderId,
+        string $customerEmail,
+        ?string $draftName = null
+    ): array {
+        $gid = str_starts_with($draftOrderId, 'gid://')
+            ? $draftOrderId
+            : 'gid://shopify/DraftOrder/'.$draftOrderId;
+
+        $invoiceMutation = <<<'GQL'
+        mutation SendDraftOrderInvoice($id: ID!, $email: EmailInput) {
+            draftOrderInvoiceSend(id: $id, email: $email) {
+                draftOrder {
+                    id
+                    invoiceUrl
+                    status
+                }
+                userErrors {
+                    field
+                    message
+                }
+            }
+        }
+        GQL;
+
+        $emailInput = [
+            'to' => $customerEmail,
+            'subject' => $draftName
+                ? "Your Subscription Invoice — {$draftName}"
+                : 'Your Subscription Invoice',
+            'customMessage' => 'Please review and complete your recurring order by clicking the link below.',
+        ];
+
+        try {
+            $invoiceResult = $this->graphql->mutationForShop(
+                $shop,
+                'draftOrderInvoiceSend',
+                $invoiceMutation,
+                [
+                    'id' => $gid,
+                    'email' => $emailInput,
+                ]
+            );
+        } catch (ShopifySellingPlanException $exception) {
+            return [
+                'success' => false,
+                'errors' => $exception->userErrors !== []
+                    ? $exception->userErrors
+                    : [['message' => $exception->getMessage()]],
+            ];
+        }
+
+        return [
+            'success' => true,
+            'errors' => [],
+            'draftOrderId' => $gid,
+            'invoiceUrl' => $invoiceResult['draftOrder']['invoiceUrl'] ?? null,
+        ];
+    }
+
+    /**
+     * @return array{title: string, value: float, valueType: string, amount: float, description: string}|null
+     */
+    private function buildRecurringInvoiceLineDiscount(
+        ?SubscriptionPlanOption $planOption,
+        float $price,
+        int $qty
+    ): ?array {
+        if (! $planOption || ! $planOption->give_discount) {
+            return null;
+        }
+
+        $discountAmount = (float) ($planOption->discount_amount ?? 0);
+        if ($discountAmount <= 0) {
+            return null;
+        }
+
+        $type = strtolower((string) ($planOption->discount_type ?? ''));
+        $isPercent = str_contains($type, 'percent') || $type === 'percentage';
+
+        if ($isPercent) {
+            $calculated = round(($price * $qty) * ($discountAmount / 100), 2);
+
+            return [
+                'title' => "{$discountAmount}% Subscription Discount",
+                'value' => $discountAmount,
+                'valueType' => 'PERCENTAGE',
+                'amount' => $calculated,
+                'description' => 'Recurring subscription discount',
+            ];
+        }
+
+        $lineTotal = round($price * $qty, 2);
+        $capped = min($discountAmount, $lineTotal);
+
+        return [
+            'title' => 'Subscription Discount',
+            'value' => $capped,
+            'valueType' => 'FIXED_AMOUNT',
+            'amount' => $capped,
+            'description' => 'Recurring subscription discount',
         ];
     }
 }

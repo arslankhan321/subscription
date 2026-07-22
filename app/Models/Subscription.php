@@ -9,9 +9,16 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Subscription extends Model
 {
+    public const PLAN_TYPE_AUTO_CHARGE = 'auto_charge';
+
+    public const PLAN_TYPE_RECURRING_INVOICE = 'recurring_invoice';
+
     protected $fillable = [
         'shop_id',
         'customer_id',
+        'plan_type',
+        'subscription_plan_id',
+        'subscription_plan_option_id',
         'shopify_contract_id',
         'shopify_gid',
         'shopify_origin_order_id',
@@ -68,6 +75,11 @@ class Subscription extends Model
     public function recurringOrders(): HasMany
     {
         return $this->hasMany(SubscriptionRecurringOrder::class);
+    }
+
+    public function invoices(): HasMany
+    {
+        return $this->hasMany(SubscriptionInvoice::class);
     }
 
     public function activityLogs(): HasMany

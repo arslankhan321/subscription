@@ -2,9 +2,11 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useSubscriptionDetail } from "@/hooks/subscriptions/useSubscriptionDetail";
 import { useBillingCycles } from "@/hooks/subscriptions/useBillingCycles";
+import { useComingOrders } from "@/hooks/subscriptions/useComingOrders";
 import { useFulfillments } from "@/hooks/subscriptions/useFulfillments";
 import { useAddDiscountModal } from "@/Components/Subscriptions/AddDiscountModal";
 import { useCancelSubscriptionModal } from "@/Components/Subscriptions/CancelSubscriptionModal";
+import { ComingOrdersCard } from "@/Components/Subscriptions/ComingOrdersCard";
 import { CustomerCard } from "@/Components/Subscriptions/CustomerCard";
 import { FulfillmentCard } from "@/Components/Subscriptions/FulfillmentCard";
 import { PlanSubscriptionPricing } from "@/Components/Subscriptions/PlanSubscriptionPricing";
@@ -365,6 +367,11 @@ export default function SubscriptionShow() {
     const { id } = useParams();
     const { subscription, loading, error, refetch, setSubscriptionData, setDiscounts, setPaymentMethod, setShipping, setCustomer } =
         useSubscriptionDetail(id);
+
+    const isRecurringInvoice =
+        String(subscription?.plan_type || "").toLowerCase() === "recurring_invoice";
+    const planTypeReady = Boolean(subscription?.plan_type);
+
     const {
         cycles: billingCycles,
         pageInfo,
@@ -379,12 +386,25 @@ export default function SubscriptionShow() {
         unskipCycle,
         rescheduleCycle,
     } = useBillingCycles(id, {
-        enabled: Boolean(id),
+        enabled: Boolean(id) && planTypeReady && !isRecurringInvoice,
         onActionComplete: () => refetch({ silent: true }),
     });
 
     const isPrepaid =
-        detectBillingType(subscription) === BILLING_TYPES.PREPAID;
+        !isRecurringInvoice && detectBillingType(subscription) === BILLING_TYPES.PREPAID;
+
+    const {
+        invoices: comingInvoices,
+        loading: comingOrdersLoading,
+        actionLoading: comingOrdersActionLoading,
+        error: comingOrdersError,
+        requestNow,
+        resendEmail,
+        reschedule: rescheduleInvoice,
+    } = useComingOrders(id, {
+        enabled: Boolean(id) && isRecurringInvoice,
+        onActionComplete: () => refetch({ silent: true }),
+    });
 
     const {
         summary: fulfillmentSummary,
@@ -870,22 +890,35 @@ export default function SubscriptionShow() {
                             </div>
                         </div>
 
-                        <BillingCyclesCard
-                            billingCycles={billingCycles}
-                            loading={billingLoading}
-                            loadingMore={loadingMore}
-                            actionLoading={actionLoading}
-                            error={billingError}
-                            hasNextPage={pageInfo.has_next_page}
-                            firstUnbilledIndex={firstUnbilledIndex}
-                            actionsDisabled={billingActionsDisabled}
-                            isPrepaid={isPrepaid}
-                            onLoadMore={loadMore}
-                            onCharge={chargeCycle}
-                            onSkip={skipCycle}
-                            onUnskip={unskipCycle}
-                            onReschedule={rescheduleCycle}
-                        />
+                        {isRecurringInvoice ? (
+                            <ComingOrdersCard
+                                invoices={comingInvoices}
+                                loading={comingOrdersLoading}
+                                actionLoading={comingOrdersActionLoading}
+                                error={comingOrdersError}
+                                actionsDisabled={billingActionsDisabled}
+                                onRequestNow={requestNow}
+                                onResendEmail={resendEmail}
+                                onReschedule={rescheduleInvoice}
+                            />
+                        ) : (
+                            <BillingCyclesCard
+                                billingCycles={billingCycles}
+                                loading={billingLoading}
+                                loadingMore={loadingMore}
+                                actionLoading={actionLoading}
+                                error={billingError}
+                                hasNextPage={pageInfo.has_next_page}
+                                firstUnbilledIndex={firstUnbilledIndex}
+                                actionsDisabled={billingActionsDisabled}
+                                isPrepaid={isPrepaid}
+                                onLoadMore={loadMore}
+                                onCharge={chargeCycle}
+                                onSkip={skipCycle}
+                                onUnskip={unskipCycle}
+                                onReschedule={rescheduleCycle}
+                            />
+                        )}
 
                         {isPrepaid && (
                             <FulfillmentCard
@@ -939,39 +972,43 @@ export default function SubscriptionShow() {
                             onSynced={setCustomer}
                         />
 
-                        <ShippingAddressCard
-                            shipping={subscription.shipping}
-                            customerAdminUrl={
-                                subscription.customer?.admin_url ||
-                                subscription.shipping?.customer_admin_url ||
-                                subscription.payment_method?.customer_admin_url
-                            }
-                            onSelectDifferent={openSelectAddressModal}
-                            onManageCustomer={handleManageCustomerAddresses}
-                            onEditManually={openEditAddressModal}
-                        />
+                        {!isRecurringInvoice && (
+                            <>
+                                <ShippingAddressCard
+                                    shipping={subscription.shipping}
+                                    customerAdminUrl={
+                                        subscription.customer?.admin_url ||
+                                        subscription.shipping?.customer_admin_url ||
+                                        subscription.payment_method?.customer_admin_url
+                                    }
+                                    onSelectDifferent={openSelectAddressModal}
+                                    onManageCustomer={handleManageCustomerAddresses}
+                                    onEditManually={openEditAddressModal}
+                                />
 
-                        <PaymentMethodCard
-                            paymentMethod={subscription.payment_method}
-                            sendingUpdate={sendingPaymentUpdate}
-                            onSendUpdateLink={handleSendPaymentUpdate}
-                            onManageCustomer={handleManageCustomerPayment}
-                            onSwap={openSwapPaymentModal}
-                        />
+                                <PaymentMethodCard
+                                    paymentMethod={subscription.payment_method}
+                                    sendingUpdate={sendingPaymentUpdate}
+                                    onSendUpdateLink={handleSendPaymentUpdate}
+                                    onManageCustomer={handleManageCustomerPayment}
+                                    onSwap={openSwapPaymentModal}
+                                />
 
-                        <div className="subscription-card">
-                            <div className="subscription-card__header">
-                                <h3 className="subscription-card__title">Discounts</h3>
-                            </div>
-                            <div className="subscription-card__body">
-                                <p className="subscription-address-line">
-                                    {(subscription.discounts ?? []).length > 0
-                                        ? `${subscription.discounts.length} discount(s) applied. Manage them in Items.`
-                                        : "No discounts applied yet."}
-                                </p>
-                                <s-button onClick={openDiscountModal}>Add a discount</s-button>
-                            </div>
-                        </div>
+                                <div className="subscription-card">
+                                    <div className="subscription-card__header">
+                                        <h3 className="subscription-card__title">Discounts</h3>
+                                    </div>
+                                    <div className="subscription-card__body">
+                                        <p className="subscription-address-line">
+                                            {(subscription.discounts ?? []).length > 0
+                                                ? `${subscription.discounts.length} discount(s) applied. Manage them in Items.`
+                                                : "No discounts applied yet."}
+                                        </p>
+                                        <s-button onClick={openDiscountModal}>Add a discount</s-button>
+                                    </div>
+                                </div>
+                            </>
+                        )}
 
                         {subscription.shopify_origin_order_id && (
                             <div className="subscription-card">

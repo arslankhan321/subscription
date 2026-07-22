@@ -83,6 +83,26 @@ export const refundSubscriptionFulfillment = (id, fulfillmentOrderId) => {
     });
 };
 
+export const getSubscriptionInvoices = (id) => {
+    return api.get(`selling/subscriptions/${id}/invoices`);
+};
+
+export const requestSubscriptionInvoiceNow = (id, invoiceId = null) => {
+    return api.post(`selling/subscriptions/${id}/invoices/request-now`, {
+        invoice_id: invoiceId || undefined,
+    });
+};
+
+export const resendSubscriptionInvoiceEmail = (id, invoiceId) => {
+    return api.post(`selling/subscriptions/${id}/invoices/${invoiceId}/resend`);
+};
+
+export const rescheduleSubscriptionInvoice = (id, invoiceId, targetDate) => {
+    return api.post(`selling/subscriptions/${id}/invoices/${invoiceId}/reschedule`, {
+        target_date: targetDate,
+    });
+};
+
 export const addSubscriptionDiscount = (id, payload) => {
     return api.post(`selling/subscriptions/${id}/discounts`, payload);
 };

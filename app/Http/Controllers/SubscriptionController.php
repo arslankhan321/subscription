@@ -245,6 +245,72 @@ class SubscriptionController extends Controller
         }
     }
 
+    public function invoices(int $id)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'data' => $this->service->invoices($id),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function requestInvoiceNow(int $id, Request $request)
+    {
+        $validated = $request->validate([
+            'invoice_id' => ['nullable', 'integer'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Invoice requested.',
+                'data' => $this->service->requestInvoiceNow(
+                    $id,
+                    isset($validated['invoice_id']) ? (int) $validated['invoice_id'] : null
+                ),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function resendInvoiceEmail(int $id, int $invoiceId)
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Invoice email resent.',
+                'data' => $this->service->resendInvoiceEmail($id, $invoiceId),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
+    public function rescheduleInvoice(int $id, int $invoiceId, Request $request)
+    {
+        $validated = $request->validate([
+            'target_date' => ['required', 'date'],
+        ]);
+
+        try {
+            return response()->json([
+                'success' => true,
+                'message' => 'Invoice rescheduled.',
+                'data' => $this->service->rescheduleInvoice(
+                    $id,
+                    $invoiceId,
+                    $validated['target_date']
+                ),
+            ]);
+        } catch (ShopifySellingPlanException $exception) {
+            return $this->shopifyErrorResponse($exception);
+        }
+    }
+
     public function rescheduleFulfillment(int $id, Request $request)
     {
         $validated = $request->validate([

@@ -70,6 +70,7 @@ class OrdersCreateJob implements ShouldQueue
                     'shop_id' => $shop->id,
                     'order_id' => $payload['id'] ?? null,
                     'subscription_id' => $result['subscription_id'],
+                    'plan_type' => $result['plan_type'] ?? null,
                 ]);
             }
         } catch (Throwable $exception) {

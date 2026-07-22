@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Exceptions\ShopifySellingPlanException;
 use App\Models\Customer;
 use App\Models\Subscription;
+use App\Models\SubscriptionInvoice;
 use App\Models\SubscriptionPlanOption;
 use App\Models\User;
 use App\Services\Shopify\ShopifyGraphqlService;
@@ -12,6 +13,7 @@ use App\Services\Shopify\ShopifySubscriptionContractService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 
 class SubscriptionService
 {
@@ -70,6 +72,7 @@ class SubscriptionService
             'products',
             'shipping',
             'recurringOrders',
+            'invoices' => fn ($query) => $query->orderBy('scheduled_at')->orderBy('cycle_index'),
             'activityLogs' => fn ($query) => $query->orderByDesc('created_at')->orderByDesc('id')->limit(50),
         ]);
 
@@ -99,9 +102,330 @@ class SubscriptionService
             }
         } else {
             $payload['discounts'] = [];
+            $payload['payment_method'] = null;
         }
 
         return $payload;
+    }
+
+    public function invoices(int $id): array
+    {
+        $subscription = $this->findForShop($id);
+        $this->assertRecurringInvoice($subscription);
+
+        $this->createNextRecurringInvoiceSchedulesIfCompleted($subscription);
+
+        $invoices = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->whereIn('payment_status', [
+                SubscriptionInvoice::STATUS_UPCOMING,
+                SubscriptionInvoice::STATUS_PENDING,
+                SubscriptionInvoice::STATUS_FAILED,
+            ])
+            ->orderBy('scheduled_at')
+            ->orderBy('cycle_index')
+            ->get();
+
+        $nextUpcomingId = $invoices
+            ->first(fn (SubscriptionInvoice $invoice) => $invoice->payment_status === SubscriptionInvoice::STATUS_UPCOMING)
+            ?->id;
+
+        return [
+            'invoices' => $invoices->map(
+                fn (SubscriptionInvoice $invoice) => $this->transformInvoice($invoice, $nextUpcomingId)
+            )->values()->all(),
+        ];
+    }
+
+    public function requestInvoiceNow(int $id, ?int $invoiceId = null): array
+    {
+        $subscription = $this->findForShop($id, ['products', 'customer', 'shipping']);
+        $this->assertRecurringInvoice($subscription);
+        $this->createNextRecurringInvoiceSchedulesIfCompleted($subscription);
+
+        $query = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->where('payment_status', SubscriptionInvoice::STATUS_UPCOMING)
+            ->whereNull('shopify_draft_order_id')
+            ->orderBy('scheduled_at')
+            ->orderBy('cycle_index');
+
+        if ($invoiceId) {
+            $query->where('id', $invoiceId);
+        }
+
+        $invoice = $query->first();
+
+        if (! $invoice) {
+            throw new ShopifySellingPlanException('No upcoming invoice found to send.');
+        }
+
+        $shop = $subscription->shop ?? $this->shopifyGraphqlService->shop();
+        $result = $this->shopifySubscriptionContractService
+            ->createDraftFromRecurringInvoiceSubscription($shop, $subscription, $invoice);
+
+        if (! ($result['success'] ?? false)) {
+            $message = $result['errors'][0]['message']
+                ?? 'Failed to create draft invoice.';
+
+            throw new ShopifySellingPlanException($message, $result['errors'] ?? []);
+        }
+
+        $invoice->shopify_draft_order_id = $result['draftOrderId'] ?? null;
+        $invoice->invoice_url = $result['invoiceUrl'] ?? null;
+        $invoice->email_sent_at = ($result['invoiceSent'] ?? false) ? now() : null;
+        $invoice->payment_status = SubscriptionInvoice::STATUS_PENDING;
+        $invoice->save();
+
+        $this->activityLogService->logSystem(
+            $subscription,
+            SubscriptionActivityLogService::ACTION_CHARGED,
+            'Invoice requested for cycle #'.$invoice->cycle_index.'.',
+            [
+                'invoice_id' => $invoice->id,
+                'cycle_index' => $invoice->cycle_index,
+                'draft_order_id' => $invoice->shopify_draft_order_id,
+            ]
+        );
+
+        $this->syncNextBillingDateFromInvoices($subscription);
+
+        return [
+            'invoice' => $this->transformInvoice($invoice->fresh()),
+        ];
+    }
+
+    public function resendInvoiceEmail(int $id, int $invoiceId): array
+    {
+        $subscription = $this->findForShop($id, ['customer']);
+        $this->assertRecurringInvoice($subscription);
+
+        $invoice = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->where('id', $invoiceId)
+            ->first();
+
+        if (! $invoice) {
+            throw new ShopifySellingPlanException('Invoice not found.');
+        }
+
+        if (empty($invoice->shopify_draft_order_id)) {
+            throw new ShopifySellingPlanException('Draft order not created yet for this invoice.');
+        }
+
+        $customerEmail = $subscription->customer?->email;
+        if (! $customerEmail) {
+            throw new ShopifySellingPlanException('Customer email not found.');
+        }
+
+        $shop = $subscription->shop ?? $this->shopifyGraphqlService->shop();
+        $result = $this->shopifySubscriptionContractService->resendDraftOrderInvoice(
+            $shop,
+            (string) $invoice->shopify_draft_order_id,
+            (string) $customerEmail
+        );
+
+        if (! ($result['success'] ?? false)) {
+            $message = $result['errors'][0]['message'] ?? 'Failed to resend invoice email.';
+            throw new ShopifySellingPlanException($message, $result['errors'] ?? []);
+        }
+
+        $invoice->invoice_url = $result['invoiceUrl'] ?? $invoice->invoice_url;
+        $invoice->email_sent_at = now();
+        $invoice->save();
+
+        return [
+            'invoice' => $this->transformInvoice($invoice->fresh()),
+        ];
+    }
+
+    public function rescheduleInvoice(int $id, int $invoiceId, string $targetDate): array
+    {
+        $subscription = $this->findForShop($id);
+        $this->assertRecurringInvoice($subscription);
+
+        $invoice = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->where('id', $invoiceId)
+            ->first();
+
+        if (! $invoice) {
+            throw new ShopifySellingPlanException('Invoice not found.');
+        }
+
+        if ($invoice->payment_status === SubscriptionInvoice::STATUS_PAID) {
+            throw new ShopifySellingPlanException('Paid invoices cannot be rescheduled.');
+        }
+
+        $targetCarbon = Carbon::parse($targetDate)->utc()->seconds(0);
+        $minuteStart = $targetCarbon->copy();
+        $minuteEnd = $targetCarbon->copy()->addSeconds(59);
+
+        $exists = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->where('id', '!=', $invoice->id)
+            ->whereBetween('scheduled_at', [$minuteStart, $minuteEnd])
+            ->exists();
+
+        if ($exists) {
+            throw new ShopifySellingPlanException(
+                "Could not save the modified date and time. Make sure that there isn't another billing attempt set up for the same date and time."
+            );
+        }
+
+        $invoice->scheduled_at = $targetCarbon;
+        $invoice->save();
+
+        $this->syncNextBillingDateFromInvoices($subscription);
+
+        return [
+            'invoice' => $this->transformInvoice($invoice->fresh()),
+        ];
+    }
+
+    private function assertRecurringInvoice(Subscription $subscription): void
+    {
+        if (($subscription->plan_type ?? null) !== Subscription::PLAN_TYPE_RECURRING_INVOICE) {
+            throw new ShopifySellingPlanException('Subscription is not a recurring-invoice type.');
+        }
+    }
+
+    private function createNextRecurringInvoiceSchedulesIfCompleted(Subscription $subscription): void
+    {
+        $hasOpenInvoice = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->whereIn('payment_status', [
+                SubscriptionInvoice::STATUS_UPCOMING,
+                SubscriptionInvoice::STATUS_PENDING,
+                SubscriptionInvoice::STATUS_FAILED,
+            ])
+            ->exists();
+
+        if ($hasOpenInvoice) {
+            return;
+        }
+
+        $lastInvoice = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->orderByDesc('cycle_index')
+            ->first();
+
+        if (! $lastInvoice) {
+            return;
+        }
+
+        $intervalValue = max(1, (int) (
+            $lastInvoice->interval_value
+            ?: $subscription->billing_interval_count
+            ?: $subscription->delivery_interval_count
+            ?: 1
+        ));
+        $intervalUnit = $this->normalizeInvoiceInterval((string) (
+            $lastInvoice->interval_unit
+            ?: $subscription->billing_interval
+            ?: $subscription->delivery_interval
+            ?: 'months'
+        ));
+        $baseScheduledAt = Carbon::parse($lastInvoice->scheduled_at)->utc();
+        $lineItemProperties = $lastInvoice->line_item_properties ?? [];
+
+        for ($offset = 1; $offset <= 5; $offset++) {
+            $cycleIndex = (int) $lastInvoice->cycle_index + $offset;
+            $scheduledAt = $this->addInvoiceInterval(
+                $baseScheduledAt->copy(),
+                $intervalUnit,
+                $intervalValue * $offset
+            );
+
+            SubscriptionInvoice::query()->firstOrCreate(
+                [
+                    'subscription_id' => $subscription->id,
+                    'cycle_index' => $cycleIndex,
+                ],
+                [
+                    'shop_id' => $subscription->shop_id,
+                    'scheduled_at' => $scheduledAt,
+                    'interval_value' => $intervalValue,
+                    'interval_unit' => $intervalUnit,
+                    'payment_status' => SubscriptionInvoice::STATUS_UPCOMING,
+                    'line_item_properties' => $lineItemProperties,
+                ]
+            );
+        }
+
+        $this->syncNextBillingDateFromInvoices($subscription);
+
+        Log::info('Manual recurring invoice schedules extended', [
+            'subscription_id' => $subscription->id,
+            'from_cycle' => (int) $lastInvoice->cycle_index + 1,
+            'to_cycle' => (int) $lastInvoice->cycle_index + 5,
+            'interval' => "{$intervalValue} {$intervalUnit}",
+        ]);
+    }
+
+    private function syncNextBillingDateFromInvoices(Subscription $subscription): void
+    {
+        $nextInvoice = SubscriptionInvoice::query()
+            ->where('subscription_id', $subscription->id)
+            ->where('payment_status', SubscriptionInvoice::STATUS_UPCOMING)
+            ->orderBy('scheduled_at')
+            ->orderBy('cycle_index')
+            ->first();
+
+        if ($nextInvoice) {
+            $subscription->update([
+                'next_billing_date' => $nextInvoice->scheduled_at,
+            ]);
+        }
+    }
+
+    private function normalizeInvoiceInterval(string $interval): string
+    {
+        $normalized = strtolower(trim($interval));
+
+        return match ($normalized) {
+            'day', 'days' => 'days',
+            'week', 'weeks' => 'weeks',
+            'year', 'years' => 'years',
+            default => 'months',
+        };
+    }
+
+    private function addInvoiceInterval(Carbon $date, string $interval, int $count): Carbon
+    {
+        return match ($this->normalizeInvoiceInterval($interval)) {
+            'days' => $date->addDays($count),
+            'weeks' => $date->addWeeks($count),
+            'years' => $date->addYears($count),
+            default => $date->addMonths($count),
+        };
+    }
+
+    private function transformInvoice(
+        SubscriptionInvoice $invoice,
+        ?int $nextUpcomingId = null
+    ): array {
+        return [
+            'id' => $invoice->id,
+            'cycle_index' => $invoice->cycle_index,
+            'scheduled_at' => $invoice->scheduled_at?->toIso8601String(),
+            'interval_value' => $invoice->interval_value,
+            'interval_unit' => $invoice->interval_unit,
+            'payment_status' => $invoice->payment_status,
+            'shopify_draft_order_id' => $invoice->shopify_draft_order_id,
+            'invoice_url' => $invoice->invoice_url,
+            'email_sent_at' => $invoice->email_sent_at?->toIso8601String(),
+            'paid_at' => $invoice->paid_at?->toIso8601String(),
+            'is_next' => $nextUpcomingId !== null && (int) $invoice->id === (int) $nextUpcomingId,
+            'can_request_now' => $nextUpcomingId !== null
+                && (int) $invoice->id === (int) $nextUpcomingId
+                && $invoice->payment_status === SubscriptionInvoice::STATUS_UPCOMING
+                && empty($invoice->shopify_draft_order_id),
+            'can_resend' => $invoice->payment_status === SubscriptionInvoice::STATUS_PENDING
+                && ! empty($invoice->shopify_draft_order_id),
+            'can_reschedule' => $invoice->payment_status === SubscriptionInvoice::STATUS_UPCOMING
+                && empty($invoice->shopify_draft_order_id),
+        ];
     }
 
     public function billingCycles(int $id, array $params = []): array
@@ -1146,11 +1470,15 @@ class SubscriptionService
             'id' => $subscription->id,
             'reference' => '#'.$subscription->id,
             'shopify_contract_id' => $subscription->shopify_contract_id,
+            'plan_type' => $subscription->plan_type ?? Subscription::PLAN_TYPE_AUTO_CHARGE,
             'status' => $subscription->status,
             'customer_name' => trim(($customer?->first_name ?? '').' '.($customer?->last_name ?? '')) ?: 'Unknown customer',
             'customer_email' => $customer?->email,
             'created_at' => optional($subscription->shopify_created_at ?? $subscription->created_at)?->toIso8601String(),
-            'subscription_type' => $this->resolveSubscriptionType($products),
+            'subscription_type' => $this->resolveSubscriptionType(
+                $products,
+                $subscription->plan_type ?? Subscription::PLAN_TYPE_AUTO_CHARGE
+            ),
             'items_count' => $products->count(),
             'total_amount' => round($total, 2),
             'currency_code' => $subscription->currency_code,
@@ -1179,6 +1507,8 @@ class SubscriptionService
             'shopify_gid' => $subscription->shopify_gid,
             'shopify_origin_order_id' => $subscription->shopify_origin_order_id,
             'shopify_origin_order_gid' => $subscription->shopify_origin_order_gid,
+            'subscription_plan_id' => $subscription->subscription_plan_id,
+            'subscription_plan_option_id' => $subscription->subscription_plan_option_id,
             'billing_interval' => $subscription->billing_interval,
             'billing_interval_count' => $subscription->billing_interval_count,
             'billing_min_cycles' => $subscription->billing_min_cycles,
@@ -1230,6 +1560,28 @@ class SubscriptionService
                     'processed_at' => $order->processed_at?->toIso8601String(),
                 ])
                 ->all(),
+            'invoices' => $subscription->relationLoaded('invoices')
+                ? (function () use ($subscription) {
+                    $open = $subscription->invoices
+                        ->filter(fn ($invoice) => in_array($invoice->payment_status, [
+                            SubscriptionInvoice::STATUS_UPCOMING,
+                            SubscriptionInvoice::STATUS_PENDING,
+                            SubscriptionInvoice::STATUS_FAILED,
+                        ], true))
+                        ->sortBy([
+                            ['scheduled_at', 'asc'],
+                            ['cycle_index', 'asc'],
+                        ])
+                        ->values();
+                    $nextUpcomingId = $open
+                        ->first(fn ($invoice) => $invoice->payment_status === SubscriptionInvoice::STATUS_UPCOMING)
+                        ?->id;
+
+                    return $open->map(
+                        fn ($invoice) => $this->transformInvoice($invoice, $nextUpcomingId)
+                    )->all();
+                })()
+                : [],
             'products' => $this->transformDetailProducts($subscription)->all(),
             'activity_logs' => $subscription->relationLoaded('activityLogs')
                 ? $subscription->activityLogs
@@ -1482,8 +1834,12 @@ class SubscriptionService
         ];
     }
 
-    private function resolveSubscriptionType($products): string
+    private function resolveSubscriptionType($products, ?string $planType = null): string
     {
+        if ($planType === Subscription::PLAN_TYPE_RECURRING_INVOICE) {
+            return 'Recurring invoices';
+        }
+
         $sellingPlanName = $products->first()?->selling_plan_name;
 
         if ($sellingPlanName && str_contains(strtolower($sellingPlanName), 'invoice')) {
