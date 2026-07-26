@@ -2245,6 +2245,20 @@ class ShopifySubscriptionContractService
                 billingAttemptExpectedDate
                 cycleStartAt
                 cycleEndAt
+                billingAttempts(first: 1, reverse: true) {
+                    edges {
+                        node {
+                            id
+                            ready
+                            errorMessage
+                            order {
+                                id
+                                name
+                                displayFinancialStatus
+                            }
+                        }
+                    }
+                }
             }
         }
         GQL;
@@ -2252,6 +2266,48 @@ class ShopifySubscriptionContractService
         $data = $this->graphql->executeForShop($shop, $query, [
             'contractId' => $contractGid,
             'index' => $cycleIndex,
+        ]);
+
+        return $this->normalizeBillingCycle($data['subscriptionBillingCycle'] ?? []);
+    }
+
+    public function fetchBillingCycleByDate(User $shop, string $contractGid, string $date): ?array
+    {
+        $query = <<<'GQL'
+        query subscriptionBillingCycleByDate($contractId: ID!, $date: DateTime!) {
+            subscriptionBillingCycle(
+                billingCycleInput: {
+                    contractId: $contractId
+                    selector: { date: $date }
+                }
+            ) {
+                cycleIndex
+                skipped
+                status
+                billingAttemptExpectedDate
+                cycleStartAt
+                cycleEndAt
+                billingAttempts(first: 1, reverse: true) {
+                    edges {
+                        node {
+                            id
+                            ready
+                            errorMessage
+                            order {
+                                id
+                                name
+                                displayFinancialStatus
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        GQL;
+
+        $data = $this->graphql->executeForShop($shop, $query, [
+            'contractId' => $contractGid,
+            'date' => $date,
         ]);
 
         return $this->normalizeBillingCycle($data['subscriptionBillingCycle'] ?? []);

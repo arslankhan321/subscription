@@ -81,16 +81,14 @@ class SubscriptionBillingSchedulerService
         $timezone = $settings->billing_timezone ?: 'UTC';
         $now = Carbon::now($timezone);
 
+        $nowUtc = Carbon::now('UTC')->startOfMinute();
+        $now = $nowUtc->copy()->setTimezone($timezone);
         $subscriptions = Subscription::query()
             ->where('shop_id', $shop->id)
             ->where('status', 'active')
             ->whereNotNull('shopify_gid')
             ->whereNotNull('next_billing_date')
-            ->where('next_billing_date', '<=', $now->copy()->utc())
-            ->where(function ($query) {
-                $query->whereNull('last_payment_status')
-                    ->orWhere('last_payment_status', '!=', 'FAILED');
-            })
+            ->where('next_billing_date', '<=', $now)
             ->with('products')
             ->orderBy('next_billing_date')
             ->limit(100)
@@ -168,32 +166,26 @@ class SubscriptionBillingSchedulerService
 
     private function resolveDueCycleIndex(User $shop, Subscription $subscription, Carbon $now): ?int
     {
-        $page = 1;
-
-        while ($page <= 5) {
-            $result = $this->shopifySubscriptionContractService->fetchBillingCycles(
-                $shop,
-                $subscription->shopify_gid,
-                $page,
-                10
-            );
-
-            foreach ($result['cycles'] as $cycle) {
-                if (! $this->isChargeableCycle($cycle, $now)) {
-                    continue;
-                }
-
-                return (int) $cycle['cycle_index'];
-            }
-
-            if (! ($result['page_info']['has_next_page'] ?? false)) {
-                break;
-            }
-
-            $page++;
+        if (! $subscription->shopify_gid || ! $subscription->next_billing_date) {
+            return null;
         }
 
-        return null;
+        $cycle = $this->shopifySubscriptionContractService->fetchBillingCycleByDate(
+            $shop,
+            $subscription->shopify_gid,
+            $subscription->next_billing_date->utc()->toIso8601String()
+            // '2026-07-27T00:00:00Z'
+        );
+
+        if (! $cycle || $cycle['cycle_index'] === null) {
+            return null;
+        }
+
+        if (! $this->isChargeableCycle($cycle, $now)) {
+            return null;
+        }
+
+        return (int) $cycle['cycle_index'];
     }
 
     private function isChargeableCycle(array $cycle, Carbon $now): bool
